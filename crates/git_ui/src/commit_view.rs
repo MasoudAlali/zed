@@ -196,19 +196,21 @@ impl CommitView {
 
                         let pane = workspace.active_pane();
                         pane.update(cx, |pane, cx| {
-                            let ix = pane.items().position(|item| {
-                                let commit_view = item.downcast::<CommitView>();
-                                commit_view
+                            // If the same commit is already open, just activate it.
+                            let same_sha_ix = pane.items().position(|item| {
+                                item.downcast::<CommitView>()
                                     .is_some_and(|view| view.read(cx).commit.sha == commit_sha)
                             });
-                            if let Some(ix) = ix {
-                                let existing = pane
-                                    .items()
-                                    .filter_map(|item| item.downcast::<CommitView>())
-                                    .find(|view| view.read(cx).commit.sha == commit_sha)
-                                    .unwrap();
-
-                                pane.remove_item(existing.item_id(), false, false, window, cx);
+                            if let Some(ix) = same_sha_ix {
+                                pane.activate_item(ix, true, true, window, cx);
+                                return;
+                            }
+                            // Replace any existing commit view tab rather than stacking new ones.
+                            let existing = pane.items().enumerate().find_map(|(ix, item)| {
+                                item.downcast::<CommitView>().map(|v| (ix, v.item_id()))
+                            });
+                            if let Some((ix, old_id)) = existing {
+                                pane.remove_item(old_id, false, false, window, cx);
                                 pane.add_item(
                                     Box::new(commit_view),
                                     true,

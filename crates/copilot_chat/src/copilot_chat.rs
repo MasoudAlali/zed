@@ -3,6 +3,7 @@ pub mod responses;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use anyhow::{Result, anyhow};
@@ -11,7 +12,7 @@ use fs::Fs;
 use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
 use gpui::TaskExt;
 use gpui::WeakEntity;
-use gpui::{App, AsyncApp, Global, prelude::*};
+use gpui::{App, AsyncApp, Global, Task, prelude::*};
 use http_client::HttpRequestExt;
 use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use paths::home_dir;
@@ -22,6 +23,33 @@ use serde::{Deserialize, Serialize};
 pub const COPILOT_OAUTH_ENV_VAR: &str = "GH_COPILOT_TOKEN";
 pub const GITHUB_COPILOT_OAUTH_ENV_VAR: &str = "GITHUB_COPILOT_TOKEN";
 const DEFAULT_COPILOT_API_ENDPOINT: &str = "https://api.githubcopilot.com";
+
+/// The public OAuth client ID of GitHub Copilot. In the OAuth device flow the
+/// client ID is a public identifier (there is no client secret), so it is baked
+/// into the client just like every official Copilot integration does (VS Code,
+/// copilot.vim, etc.). It can be overridden via `ZED_COPILOT_CLIENT_ID` for
+/// enterprise or future-proofing without a rebuild.
+const DEFAULT_GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+
+fn github_copilot_client_id() -> String {
+    std::env::var("ZED_COPILOT_CLIENT_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| DEFAULT_GITHUB_COPILOT_CLIENT_ID.to_string())
+}
+
+/// Progress of the GitHub OAuth device flow that Zed drives itself to obtain a
+/// Copilot Chat token. This is independent of the Copilot language server, which
+/// stores its credentials in an encrypted database we cannot read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopilotChatStatus {
+    SignedOut,
+    SigningIn {
+        user_code: String,
+        verification_uri: String,
+    },
+    Authorized,
+}
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct CopilotChatConfiguration {
@@ -498,6 +526,7 @@ impl Global for GlobalCopilotChat {}
 
 pub struct CopilotChat {
     oauth_token: Option<String>,
+    status: CopilotChatStatus,
     api_endpoint: Option<String>,
     configuration: CopilotChatConfiguration,
     models: Option<Vec<Model>>,
@@ -571,10 +600,12 @@ impl CopilotChat {
                 let oauth_token =
                     read_oauth_token(&fs, &config_paths, &oauth_domain, &auth_db_path, cx).await;
 
-                if oauth_token.is_some() {
+                // Only adopt a token discovered in env/db/legacy config files;
+                // never clobber a token obtained through the device flow with
+                // `None` when those sources are absent.
+                if let Some(oauth_token) = oauth_token {
                     this.update(cx, |this, cx| {
-                        this.oauth_token = oauth_token;
-                        cx.notify();
+                        this.set_oauth_token(Some(oauth_token), cx);
                     })?;
                     Self::update_models(&this, cx).await?;
                 }
@@ -585,8 +616,16 @@ impl CopilotChat {
 
         // Initial state uses env var because it's cheap. The others do IO, so
         // are on the background.
+        let env_token = oauth_token_from_env();
+        let status = if env_token.is_some() {
+            CopilotChatStatus::Authorized
+        } else {
+            CopilotChatStatus::SignedOut
+        };
+
         let this = Self {
-            oauth_token: oauth_token_from_env(),
+            oauth_token: env_token,
+            status,
             api_endpoint: None,
             models: None,
             configuration,
@@ -597,9 +636,122 @@ impl CopilotChat {
         if this.oauth_token.is_some() {
             cx.spawn(async move |this, cx| Self::update_models(&this, cx).await)
                 .detach_and_log_err(cx);
+        } else {
+            // Attempt to restore a token saved by a previous device-flow sign-in.
+            cx.spawn(async move |this, cx| {
+                let credentials_url =
+                    this.read_with(cx, |this, _| this.credentials_url())?;
+                let token = cx
+                    .update(|cx| cx.read_credentials(&credentials_url))
+                    .await?;
+                if let Some((_, token)) = token {
+                    let token = String::from_utf8(token)?;
+                    this.update(cx, |this, cx| {
+                        this.set_oauth_token(Some(token), cx);
+                    })?;
+                    Self::update_models(&this, cx).await?;
+                }
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
         }
 
         this
+    }
+
+    /// Keychain key under which the device-flow OAuth token is stored. Namespaced
+    /// by OAuth domain so enterprise and github.com tokens don't collide.
+    fn credentials_url(&self) -> String {
+        format!(
+            "https://copilot-chat.zed.dev/{}",
+            self.configuration.oauth_domain()
+        )
+    }
+
+    fn set_oauth_token(&mut self, token: Option<String>, cx: &mut Context<Self>) {
+        self.status = if token.is_some() {
+            CopilotChatStatus::Authorized
+        } else {
+            CopilotChatStatus::SignedOut
+        };
+        self.oauth_token = token;
+        cx.notify();
+    }
+
+    pub fn status(&self) -> CopilotChatStatus {
+        self.status.clone()
+    }
+
+    /// Drives the GitHub OAuth device flow to obtain a Copilot token, persists it
+    /// in the keychain, and refreshes the available models. Progress is reflected
+    /// in [`Self::status`] so the UI can show the user code.
+    pub fn sign_in(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        if self.is_authenticated() {
+            return Task::ready(Ok(()));
+        }
+        if let CopilotChatStatus::SigningIn { .. } = self.status {
+            return Task::ready(Ok(()));
+        }
+
+        let client = self.client.clone();
+        let domain = self.configuration.oauth_domain();
+        let client_id = github_copilot_client_id();
+
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let device_code = request_device_code(&client, &domain, &client_id).await?;
+
+                this.update(cx, |this, cx| {
+                    this.status = CopilotChatStatus::SigningIn {
+                        user_code: device_code.user_code.clone(),
+                        verification_uri: device_code.verification_uri.clone(),
+                    };
+                    cx.notify();
+                })?;
+
+                cx.update(|cx| cx.open_url(&device_code.verification_uri));
+
+                let token =
+                    poll_for_access_token(&client, &domain, &client_id, &device_code, cx).await?;
+
+                let credentials_url = this.read_with(cx, |this, _| this.credentials_url())?;
+                cx.update(|cx| cx.write_credentials(&credentials_url, "oauth", token.as_bytes()))
+                    .await?;
+
+                this.update(cx, |this, cx| {
+                    this.set_oauth_token(Some(token), cx);
+                })?;
+
+                Self::update_models(&this, cx).await?;
+                anyhow::Ok(())
+            }
+            .await;
+
+            if result.is_err() {
+                this.update(cx, |this, cx| {
+                    if !this.is_authenticated() {
+                        this.status = CopilotChatStatus::SignedOut;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+
+            result
+        })
+    }
+
+    /// Clears the Copilot Chat token from memory and the keychain. A token coming
+    /// from the `GH_COPILOT_TOKEN` env var can only be cleared for this session.
+    pub fn sign_out(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let credentials_url = self.credentials_url();
+        self.api_endpoint = None;
+        self.models = None;
+        self.set_oauth_token(None, cx);
+
+        cx.spawn(async move |_, cx| {
+            cx.update(|cx| cx.delete_credentials(&credentials_url)).await
+        })
     }
 
     async fn update_models(this: &WeakEntity<Self>, cx: &mut AsyncApp) -> Result<()> {
@@ -960,6 +1112,118 @@ async fn request_models(
     let models = serde_json::from_str::<ModelSchema>(body_str)?.data;
 
     Ok(models)
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    #[serde(default = "default_poll_interval")]
+    interval: u64,
+}
+
+fn default_poll_interval() -> u64 {
+    5
+}
+
+#[derive(Debug, Deserialize)]
+struct AccessTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+}
+
+fn github_base_url(domain: &str) -> String {
+    if domain == "github.com" {
+        "https://github.com".to_string()
+    } else {
+        format!("https://{}", domain)
+    }
+}
+
+async fn request_device_code(
+    client: &Arc<dyn HttpClient>,
+    domain: &str,
+    client_id: &str,
+) -> Result<DeviceCodeResponse> {
+    let url = format!("{}/login/device/code", github_base_url(domain));
+    let body = serde_json::to_string(&serde_json::json!({
+        "client_id": client_id,
+        "scope": "read:user",
+    }))?;
+
+    let request = HttpRequest::builder()
+        .method(Method::POST)
+        .uri(&url)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .body(AsyncBody::from(body))?;
+
+    let mut response = client.send(request).await?;
+    if !response.status().is_success() {
+        let mut text = String::new();
+        response.body_mut().read_to_string(&mut text).await?;
+        anyhow::bail!(
+            "Failed to request GitHub device code: {} {}",
+            response.status(),
+            text
+        );
+    }
+
+    let mut text = String::new();
+    response.body_mut().read_to_string(&mut text).await?;
+    serde_json::from_str(&text).context("Failed to parse GitHub device code response")
+}
+
+async fn poll_for_access_token(
+    client: &Arc<dyn HttpClient>,
+    domain: &str,
+    client_id: &str,
+    device_code: &DeviceCodeResponse,
+    cx: &mut AsyncApp,
+) -> Result<String> {
+    let url = format!("{}/login/oauth/access_token", github_base_url(domain));
+    let body = serde_json::to_string(&serde_json::json!({
+        "client_id": client_id,
+        "device_code": device_code.device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    }))?;
+
+    let mut interval = Duration::from_secs(device_code.interval.max(1));
+
+    loop {
+        cx.background_executor().timer(interval).await;
+
+        let request = HttpRequest::builder()
+            .method(Method::POST)
+            .uri(&url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .body(AsyncBody::from(body.clone()))?;
+
+        let mut response = client.send(request).await?;
+        let mut text = String::new();
+        response.body_mut().read_to_string(&mut text).await?;
+        let parsed: AccessTokenResponse =
+            serde_json::from_str(&text).context("Failed to parse GitHub access token response")?;
+
+        if let Some(access_token) = parsed.access_token {
+            return Ok(access_token);
+        }
+
+        match parsed.error.as_deref() {
+            // The user has not yet entered the code; keep polling.
+            Some("authorization_pending") => {}
+            // GitHub asked us to back off; slow the polling down.
+            Some("slow_down") => interval += Duration::from_secs(5),
+            Some("expired_token") => {
+                anyhow::bail!("The device code expired before sign-in completed. Please try again.")
+            }
+            Some("access_denied") => anyhow::bail!("Sign-in was cancelled."),
+            Some(other) => anyhow::bail!("GitHub sign-in failed: {other}"),
+            None => anyhow::bail!("GitHub sign-in failed: unexpected empty response"),
+        }
+    }
 }
 
 async fn read_oauth_token(

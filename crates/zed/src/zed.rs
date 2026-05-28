@@ -24,6 +24,7 @@ use assets::Assets;
 use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
 use collections::VecDeque;
+use database_ui::DatabasePanel;
 use debugger_ui::debugger_panel::DebugPanel;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
@@ -42,6 +43,7 @@ use gpui::{
     actions, image_cache, img, point, px, retain_all,
 };
 use image_viewer::ImageInfo;
+use knip::KnipPanel;
 use language::Capability;
 use language_onboarding::BasedPyrightBanner;
 use language_tools::lsp_button::{self, LspButton};
@@ -729,7 +731,9 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
-        let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
+        let knip_panel = KnipPanel::load(workspace_handle.clone(), cx.clone());
+        let debug_panel = DebugPanel::load(workspace_handle.clone(), &mut cx.clone());
+        let database_panel = DatabasePanel::load(workspace_handle.clone(), cx.clone());
 
         async fn add_panel_when_ready(
             panel_task: impl Future<Output = anyhow::Result<Entity<impl workspace::Panel>>> + 'static,
@@ -753,6 +757,8 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(database_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(knip_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
         );
 
@@ -5456,6 +5462,7 @@ mod tests {
             editor::init(cx);
             collab_ui::init(&app_state, cx);
             git_ui::init(cx);
+            knip::init(cx);
             project_panel::init(cx);
             outline_panel::init(cx);
             terminal_view::init(cx);

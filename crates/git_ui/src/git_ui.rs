@@ -416,6 +416,82 @@ impl Render for RenameBranchModal {
     }
 }
 
+pub(crate) struct StashAllModal {
+    editor: Entity<Editor>,
+    repo: Entity<Repository>,
+}
+
+impl StashAllModal {
+    pub(crate) fn new(
+        default_message: String,
+        repo: Entity<Repository>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Stash message (optional)", window, cx);
+            if !default_message.is_empty() {
+                editor.set_text(default_message, window, cx);
+            }
+            editor
+        });
+        Self { editor, repo }
+    }
+
+    fn cancel(&mut self, _: &Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).text(cx);
+        let trimmed = text.trim();
+        let message = if trimmed.is_empty() {
+            None
+        } else {
+            Some(SharedString::from(trimmed.to_string()))
+        };
+
+        let repo = self.repo.clone();
+        cx.spawn(async move |_, cx| {
+            repo.update(cx, |repo, cx| repo.stash_all(message, cx))
+                .await
+        })
+        .detach_and_prompt_err("Failed to stash", window, cx, |_, _, _| None);
+        cx.emit(DismissEvent);
+    }
+}
+
+impl EventEmitter<DismissEvent> for StashAllModal {}
+impl ModalView for StashAllModal {}
+impl Focusable for StashAllModal {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
+    }
+}
+
+impl Render for StashAllModal {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .key_context("StashAllModal")
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::confirm))
+            .elevation_2(cx)
+            .w(rems(34.))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .w_full()
+                    .gap_1p5()
+                    .child(Icon::new(IconName::Archive).size(IconSize::XSmall))
+                    .child(Headline::new("Stash Changes").size(HeadlineSize::XSmall)),
+            )
+            .child(div().px_3().pb_3().w_full().child(self.editor.clone()))
+    }
+}
+
 fn rename_current_branch(
     workspace: &mut Workspace,
     window: &mut Window,

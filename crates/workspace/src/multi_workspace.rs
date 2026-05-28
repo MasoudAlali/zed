@@ -120,6 +120,10 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
     fn has_notifications(&self, cx: &App) -> bool;
     fn side(&self, _cx: &App) -> SidebarSide;
 
+    fn show_toggle_button(&self, _cx: &App) -> bool {
+        true
+    }
+
     fn is_threads_list_view_active(&self) -> bool {
         true
     }
@@ -162,6 +166,7 @@ pub trait SidebarHandle: 'static + Send + Sync {
     fn focus(&self, window: &mut Window, cx: &mut App);
     fn prepare_for_focus(&self, window: &mut Window, cx: &mut App);
     fn has_notifications(&self, cx: &App) -> bool;
+    fn show_toggle_button(&self, cx: &App) -> bool;
     fn to_any(&self) -> AnyView;
     fn entity_id(&self) -> EntityId;
     fn toggle_thread_switcher(&self, select_last: bool, window: &mut Window, cx: &mut App);
@@ -208,6 +213,10 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
 
     fn has_notifications(&self, cx: &App) -> bool {
         self.read(cx).has_notifications(cx)
+    }
+
+    fn show_toggle_button(&self, cx: &App) -> bool {
+        self.read(cx).show_toggle_button(cx)
     }
 
     fn to_any(&self) -> AnyView {
@@ -400,6 +409,14 @@ impl MultiWorkspace {
 
     pub fn multi_workspace_enabled(&self, cx: &App) -> bool {
         !DisableAiSettings::get_global(cx).disable_ai && AgentSettings::get_global(cx).enabled
+    }
+
+    pub fn should_show_sidebar_toggle(&self, cx: &App) -> bool {
+        self.multi_workspace_enabled(cx)
+            && self
+                .sidebar
+                .as_ref()
+                .map_or(true, |s| s.show_toggle_button(cx))
     }
 
     pub fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {

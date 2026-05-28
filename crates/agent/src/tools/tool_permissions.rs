@@ -3,7 +3,7 @@ use crate::{
     decide_permission_for_path,
 };
 use agent_client_protocol::schema as acp;
-use agent_skills::is_agents_skills_path;
+use agent_skills::is_skills_path;
 use anyhow::{Result, anyhow};
 use fs::Fs;
 use gpui::{App, Entity, Task, WeakEntity};
@@ -98,16 +98,24 @@ async fn canonicalize_with_ancestors(path: &Path, fs: &dyn Fs) -> Option<PathBuf
     }
 }
 
-/// Returns the canonicalized global agent skills directory
-/// (`~/.agents/skills`).
+/// Returns the canonicalized global skill roots (`~/.agents/skills` and
+/// `~/.claude/skills`). Only roots that canonicalize successfully are
+/// included; a missing root produces no entry rather than blocking the
+/// other.
 ///
 /// Recomputed on every call rather than cached: the underlying
 /// `canonicalize_with_ancestors` is a few `stat` syscalls (which the OS
 /// page cache already handles), and a process-wide cache would either go
-/// stale if the user moved `~/.agents/skills`, or pollute across tests
+/// stale if the user moved one of the roots, or pollute across tests
 /// using different `FakeFs` instances.
-async fn canonical_global_skills_dir(fs: &dyn Fs) -> Option<PathBuf> {
-    canonicalize_with_ancestors(&agent_skills::global_skills_dir(), fs).await
+async fn canonical_global_skills_dirs(fs: &dyn Fs) -> Vec<PathBuf> {
+    let mut canonical = Vec::with_capacity(2);
+    for dir in agent_skills::global_skills_dirs() {
+        if let Some(canonical_dir) = canonicalize_with_ancestors(&dir, fs).await {
+            canonical.push(canonical_dir);
+        }
+    }
+    canonical
 }
 
 fn is_within_any_worktree(canonical_path: &Path, canonical_worktree_roots: &[PathBuf]) -> bool {
@@ -116,14 +124,15 @@ fn is_within_any_worktree(canonical_path: &Path, canonical_worktree_roots: &[Pat
         .any(|root| canonical_path.starts_with(root))
 }
 
-/// If `path` names `~/.agents/skills` or one of its descendants, return the
+/// If `path` is an absolute or `~`-prefixed path under either global skills
+/// directory (`~/.agents/skills` or `~/.claude/skills`), return the
 /// canonicalized absolute path. Returns `None` for any path that resolves
-/// outside the global skills tree, for relative paths that don't start with
-/// `~`, or if the skills directory itself can't be canonicalized (fail closed
-/// — better to refuse access than to compare against a non-canonical path).
+/// outside every global skills tree, for relative paths that don't start with
+/// `~`, or if no root can be canonicalized (fail closed — better to refuse
+/// access than to compare against a non-canonical path).
 ///
 /// This is the gate that lets `read_file` / `list_directory` reach into the
-/// global skills directory — which lives outside any worktree — without
+/// global skills directories — which live outside any worktree — without
 /// also opening up arbitrary external paths.
 pub async fn resolve_global_skill_path(path: &Path, fs: &dyn Fs) -> Option<PathBuf> {
     let normalized_path = resolve_lexical_global_skill_path(path)?;
@@ -131,12 +140,18 @@ pub async fn resolve_global_skill_path(path: &Path, fs: &dyn Fs) -> Option<PathB
     // Canonicalize both sides so symlinks can't sneak the path out of the
     // skills tree (and so different but equivalent path representations
     // match). The lexical check above intentionally runs first, so a
-    // symlinked `~/.agents/skills` root can't broaden the allowlist to every
-    // path under the symlink target.
+    // symlinked skills root can't broaden the allowlist to every path under
+    // the symlink target.
     let canonical_path = fs.canonicalize(&normalized_path).await.ok()?;
-    let canonical_skills_dir = canonical_global_skills_dir(fs).await?;
+    let canonical_skills_dirs = canonical_global_skills_dirs(fs).await;
+    if canonical_skills_dirs.is_empty() {
+        return None;
+    }
 
-    if canonical_path.starts_with(&canonical_skills_dir) {
+    if canonical_skills_dirs
+        .iter()
+        .any(|root| canonical_path.starts_with(root))
+    {
         Some(canonical_path)
     } else {
         None
@@ -174,25 +189,30 @@ fn expand_and_normalize_absolute_path(path: &Path) -> Option<PathBuf> {
 
 fn resolve_lexical_global_skill_path(path: &Path) -> Option<PathBuf> {
     let normalized_path = expand_and_normalize_absolute_path(path)?;
-    let normalized_skills_dir = normalize_path(&agent_skills::global_skills_dir());
-
-    normalized_path
-        .starts_with(&normalized_skills_dir)
-        .then_some(normalized_path)
+    let within_any = agent_skills::global_skills_dirs()
+        .iter()
+        .any(|dir| normalized_path.starts_with(normalize_path(dir)));
+    within_any.then_some(normalized_path)
 }
 
-/// If `path` names `~/.agents/skills` or one of its descendants, return a
-/// canonical absolute path for it. Unlike [`resolve_global_skill_path`], the
-/// target path may or may not exist on disk yet — the caller decides whether
-/// to read, write, or create it. Returns `None` for any other path, including
-/// siblings of the global skills tree or paths that would escape it with `..`
-/// or symlinks.
+/// If `path` names either global skills directory (`~/.agents/skills` or
+/// `~/.claude/skills`) or one of its descendants, return a canonical absolute
+/// path for it. Unlike [`resolve_global_skill_path`], the target path may or
+/// may not exist on disk yet — the caller decides whether to read, write, or
+/// create it. Returns `None` for any other path, including siblings of the
+/// global skills trees or paths that would escape them with `..` or symlinks.
 pub async fn resolve_creatable_global_skill_path(path: &Path, fs: &dyn Fs) -> Option<PathBuf> {
     let normalized_path = resolve_lexical_global_skill_path(path)?;
     let canonical_path = canonicalize_with_ancestors(&normalized_path, fs).await?;
-    let canonical_skills_dir = canonical_global_skills_dir(fs).await?;
+    let canonical_skills_dirs = canonical_global_skills_dirs(fs).await;
+    if canonical_skills_dirs.is_empty() {
+        return None;
+    }
 
-    if canonical_path.starts_with(&canonical_skills_dir) {
+    if canonical_skills_dirs
+        .iter()
+        .any(|root| canonical_path.starts_with(root))
+    {
         Some(canonical_path)
     } else {
         None
@@ -215,11 +235,11 @@ pub async fn resolves_to_global_skills_dir(path: &Path, fs: &dyn Fs) -> bool {
     let Some(canonical_path) = canonicalize_with_ancestors(&normalized_path, fs).await else {
         return false;
     };
-    let Some(canonical_skills_dir) = canonical_global_skills_dir(fs).await else {
-        return false;
-    };
 
-    canonical_path == canonical_skills_dir
+    canonical_global_skills_dirs(fs)
+        .await
+        .iter()
+        .any(|skills_dir| &canonical_path == skills_dir)
 }
 
 /// Filters a previously-resolved global skills path so that callers which
@@ -230,8 +250,11 @@ async fn restrict_to_skill_descendant(
     fs: &dyn Fs,
 ) -> Option<PathBuf> {
     let canonical_path = canonical_path?;
-    let canonical_skills_dir = canonical_global_skills_dir(fs).await?;
-    is_strict_descendant(&canonical_path, &canonical_skills_dir).then_some(canonical_path)
+    canonical_global_skills_dirs(fs)
+        .await
+        .iter()
+        .any(|skills_dir| is_strict_descendant(&canonical_path, skills_dir))
+        .then_some(canonical_path)
 }
 
 /// Like [`resolve_global_skill_path`], but only succeeds for paths strictly
@@ -289,7 +312,7 @@ pub async fn sensitive_settings_kind(
         return Some(SensitiveSettingsKind::Local);
     }
 
-    if is_agents_skills_path(path) {
+    if is_skills_path(path) {
         return Some(SensitiveSettingsKind::AgentSkills);
     }
 
@@ -307,7 +330,7 @@ pub async fn sensitive_settings_kind(
             }) {
                 return Some(SensitiveSettingsKind::Local);
             }
-            if is_agents_skills_path(relative) {
+            if is_skills_path(relative) {
                 return Some(SensitiveSettingsKind::AgentSkills);
             }
 
@@ -316,10 +339,12 @@ pub async fn sensitive_settings_kind(
             break;
         }
 
-        if let Some(canonical_skills_dir) = canonical_global_skills_dir(fs).await {
-            if canonical_path.starts_with(&canonical_skills_dir) {
-                return Some(SensitiveSettingsKind::AgentSkills);
-            }
+        let canonical_skills_dirs = canonical_global_skills_dirs(fs).await;
+        if canonical_skills_dirs
+            .iter()
+            .any(|root| canonical_path.starts_with(root))
+        {
+            return Some(SensitiveSettingsKind::AgentSkills);
         }
 
         if let Some(canonical_config_dir) =
@@ -618,7 +643,7 @@ pub fn authorize_file_edit(
     let is_local_settings = path.components().any(|component| {
         component_matches_ignore_ascii_case(component.as_os_str(), local_settings_folder)
     });
-    let is_agents_skills = is_agents_skills_path(path);
+    let is_agents_skills = is_skills_path(path);
 
     cx.spawn(async move |cx| {
         // Resolve the path and check for symlink escapes.

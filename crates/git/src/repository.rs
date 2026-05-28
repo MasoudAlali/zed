@@ -550,6 +550,30 @@ pub fn is_binary_content(content: &[u8]) -> bool {
     content[..check_len].contains(&0)
 }
 
+// Reads the next object from `git cat-file --batch=%(objectsize)` output.
+// Returns an empty `Vec` when cat-file reports the object as "missing" or
+// "ambiguous" — notably the case for submodule pointers whose commits live in
+// another repo. Without this, `load_commit` would propagate a parse error and
+// the caller would see an empty file list.
+async fn read_cat_file_object<R>(
+    stdout: &mut R,
+    info_line: &mut String,
+    newline: &mut [u8; 1],
+) -> Result<Vec<u8>>
+where
+    R: smol::io::AsyncBufRead + smol::io::AsyncRead + Unpin,
+{
+    info_line.clear();
+    stdout.read_line(info_line).await?;
+    let Ok(len) = info_line.trim_end().parse::<usize>() else {
+        return Ok(Vec::new());
+    };
+    let mut bytes = vec![0; len];
+    stdout.read_exact(&mut bytes).await?;
+    stdout.read_exact(newline).await?;
+    Ok(bytes)
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Remote {
     pub name: SharedString,
@@ -858,6 +882,8 @@ pub trait GitRepository: Send + Sync {
 
     fn show(&self, commit: String) -> BoxFuture<'_, Result<CommitDetails>>;
 
+    fn recent_commit_messages(&self, count: usize) -> BoxFuture<'_, Result<Vec<String>>>;
+
     fn load_commit(&self, commit: String, cx: AsyncApp) -> BoxFuture<'_, Result<CommitDiff>>;
     fn blame(
         &self,
@@ -907,6 +933,7 @@ pub trait GitRepository: Send + Sync {
     fn stash_paths(
         &self,
         paths: Vec<RepoPath>,
+        message: Option<SharedString>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
 
@@ -1295,6 +1322,35 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
+    fn recent_commit_messages(&self, count: usize) -> BoxFuture<'_, Result<Vec<String>>> {
+        let git = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let count_str = count.to_string();
+                let output = git
+                    .build_command(&[
+                        "--no-optional-locks",
+                        "log",
+                        "--format=%B%x00",
+                        "-n",
+                        &count_str,
+                    ])
+                    .output()
+                    .await?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    bail!("git log failed: {stderr}");
+                }
+                let stdout = std::str::from_utf8(&output.stdout)?;
+                Ok(stdout
+                    .split('\0')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect())
+            })
+            .boxed()
+    }
+
     fn load_commit(&self, commit: String, cx: AsyncApp) -> BoxFuture<'_, Result<CommitDiff>> {
         let git = self.git_binary();
         cx.background_spawn(async move {
@@ -1365,15 +1421,8 @@ impl GitRepository for RealGitRepository {
                 }
                 stdin.flush().await?;
 
-                info_line.clear();
-                stdout.read_line(&mut info_line).await?;
-
-                let len = info_line.trim_end().parse().with_context(|| {
-                    format!("invalid object size output from cat-file {info_line}")
-                })?;
-                let mut text_bytes = vec![0; len];
-                stdout.read_exact(&mut text_bytes).await?;
-                stdout.read_exact(&mut newline).await?;
+                let text_bytes =
+                    read_cat_file_object(&mut stdout, &mut info_line, &mut newline).await?;
 
                 let mut old_text = None;
                 let mut new_text = None;
@@ -1386,14 +1435,9 @@ impl GitRepository for RealGitRepository {
 
                 match status_code {
                     StatusCode::Modified => {
-                        info_line.clear();
-                        stdout.read_line(&mut info_line).await?;
-                        let len = info_line.trim_end().parse().with_context(|| {
-                            format!("invalid object size output from cat-file {}", info_line)
-                        })?;
-                        let mut parent_bytes = vec![0; len];
-                        stdout.read_exact(&mut parent_bytes).await?;
-                        stdout.read_exact(&mut newline).await?;
+                        let parent_bytes =
+                            read_cat_file_object(&mut stdout, &mut info_line, &mut newline)
+                                .await?;
                         is_binary = is_binary || is_binary_content(&parent_bytes);
                         if is_binary {
                             old_text = Some(String::new());
@@ -2228,14 +2272,23 @@ impl GitRepository for RealGitRepository {
     fn stash_paths(
         &self,
         paths: Vec<RepoPath>,
+        message: Option<SharedString>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary_in_worktree();
         self.executor
             .spawn(async move {
                 let git = git_binary?;
+                let mut args: Vec<&str> =
+                    vec!["stash", "push", "--quiet", "--include-untracked"];
+                if let Some(message) = message.as_ref().map(|m| m.as_ref()).filter(|m| !m.is_empty())
+                {
+                    args.push("-m");
+                    args.push(message);
+                }
+                args.push("--");
                 let output = git
-                    .build_command(&["stash", "push", "--quiet", "--include-untracked", "--"])
+                    .build_command(&args)
                     .envs(env.iter())
                     .args(paths.iter().map(|p| p.as_unix_str()))
                     .output()

@@ -11,7 +11,7 @@ use git::{
     status::{FileStatus, StatusCode, TrackedStatus},
 };
 use git_ui::{
-    commit_tooltip::{CommitAvatar, CommitDetails, CommitTooltip},
+    commit_tooltip::{CommitDetails, CommitTooltip},
     commit_view::CommitView,
     git_status_icon,
 };
@@ -1520,11 +1520,33 @@ impl GitGraph {
             });
         }
 
+        // Batch all commit data reads into a single update to avoid N entity-borrow cycles per frame.
+        let row_data: Vec<CommitDataState> = if let Some(repository) = repository.as_ref() {
+            repository.update(cx, |repository, cx| {
+                range
+                    .clone()
+                    .map(|idx| {
+                        if let Some(commit) = self.graph_data.commits.get(idx) {
+                            repository
+                                .fetch_commit_data(commit.data.sha, false, cx)
+                                .clone()
+                        } else {
+                            CommitDataState::Loading(None)
+                        }
+                    })
+                    .collect()
+            })
+        } else {
+            range
+                .clone()
+                .map(|_| CommitDataState::Loading(None))
+                .collect()
+        };
+
         range
-            .map(|idx| {
-                let Some((commit, repository)) =
-                    self.graph_data.commits.get(idx).zip(repository.as_ref())
-                else {
+            .enumerate()
+            .map(|(row_offset, idx)| {
+                let Some(commit) = self.graph_data.commits.get(idx) else {
                     return vec![
                         div().h(row_height).into_any_element(),
                         div().h(row_height).into_any_element(),
@@ -1533,11 +1555,19 @@ impl GitGraph {
                     ];
                 };
 
-                let data = repository.update(cx, |repository, cx| {
-                    repository
-                        .fetch_commit_data(commit.data.sha, false, cx)
-                        .clone()
-                });
+                if repository.is_none() {
+                    return vec![
+                        div().h(row_height).into_any_element(),
+                        div().h(row_height).into_any_element(),
+                        div().h(row_height).into_any_element(),
+                        div().h(row_height).into_any_element(),
+                    ];
+                }
+
+                let data = row_data
+                    .get(row_offset)
+                    .cloned()
+                    .unwrap_or(CommitDataState::Loading(None));
 
                 let short_sha = commit.data.sha.display_short();
                 let mut formatted_time = String::new();
@@ -1612,14 +1642,15 @@ impl GitGraph {
                         .id(ElementId::NamedInteger("commit-subject".into(), idx as u64))
                         .overflow_hidden()
                         .when(!has_context_menu, |this| {
-                            if let CommitDataState::Loaded(commit_data) = &data {
+                            if let CommitDataState::Loaded(commit_data) = &data
+                                && let Some(repository) = repository.clone()
+                            {
                                 let sha = commit.data.sha.to_string();
                                 let author_name = commit_data.author_name.clone();
                                 let author_email = commit_data.author_email.clone();
                                 let message = commit_data.message.clone();
                                 let commit_timestamp = commit_data.commit_timestamp;
                                 let workspace = self.workspace.clone();
-                                let repository = repository.clone();
                                 this.hoverable_tooltip(move |_window, cx| {
                                     let remote_url = repository.read(cx).default_remote_url();
                                     let provider_registry =
@@ -2536,20 +2567,6 @@ impl GitGraph {
             })
             .unwrap_or_default();
 
-        let remote = repository.update(cx, |repo, cx| self.get_remote(repo, window, cx));
-
-        let avatar = {
-            let author_email_for_avatar = if author_email.is_empty() {
-                None
-            } else {
-                Some(author_email.clone())
-            };
-
-            CommitAvatar::new(&full_sha, author_email_for_avatar, remote.as_ref())
-                .size(px(40.))
-                .render(window, cx)
-        };
-
         let changed_files_count = self
             .selected_commit_diff
             .as_ref()
@@ -2558,6 +2575,8 @@ impl GitGraph {
 
         let (total_lines_added, total_lines_removed) =
             self.selected_commit_diff_stats.unwrap_or((0, 0));
+
+        let remote = repository.update(cx, |repo, cx| self.get_remote(repo, window, cx));
 
         let sorted_file_entries: Rc<Vec<ChangedFileEntry>> = Rc::new(
             self.selected_commit_diff
@@ -2605,7 +2624,6 @@ impl GitGraph {
                             .w_full()
                             .items_center()
                             .gap_1()
-                            .child(avatar)
                             .child(
                                 v_flex()
                                     .items_center()
@@ -2731,7 +2749,7 @@ impl GitGraph {
                                         .detach();
                                     })
                             })
-                            .when_some(remote.clone(), |this, remote| {
+                            .when_some(remote, |this, remote| {
                                 let provider_name = remote.host.name();
                                 let icon = git_ui::get_provider_icon(provider_name.as_str());
                                 let parsed_remote = ParsedGitRemote {
@@ -2807,7 +2825,7 @@ impl GitGraph {
                             .child({
                                 let entries = sorted_file_entries;
                                 let entry_count = entries.len();
-                                let commit_sha = full_sha.clone();
+                                let commit_sha = full_sha;
                                 let repository = repository.downgrade();
                                 let workspace = self.workspace.clone();
                                 uniform_list(

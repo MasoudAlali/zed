@@ -65,8 +65,8 @@ impl FeatureFlag for UpdateTitleToolFeatureFlag {
     const NAME: &'static str = "update-title-tool";
     type Value = PresenceFlag;
 
-    fn enabled_for_staff() -> bool {
-        false
+    fn enabled_for_all() -> bool {
+        true
     }
 }
 register_feature_flag!(UpdateTitleToolFeatureFlag);
@@ -77,8 +77,8 @@ impl FeatureFlag for LspToolFeatureFlag {
     const NAME: &'static str = "lsp-tool";
     type Value = PresenceFlag;
 
-    fn enabled_for_staff() -> bool {
-        false
+    fn enabled_for_all() -> bool {
+        true
     }
 }
 register_feature_flag!(LspToolFeatureFlag);
@@ -89,7 +89,7 @@ impl FeatureFlag for RenameToolFeatureFlag {
     const NAME: &'static str = "rename-tool";
     type Value = PresenceFlag;
 
-    fn enabled_for_staff() -> bool {
+    fn enabled_for_all() -> bool {
         true
     }
 }
@@ -133,6 +133,10 @@ pub struct AutoWatchFeatureFlag;
 impl FeatureFlag for AutoWatchFeatureFlag {
     const NAME: &'static str = "auto-watch-screens";
     type Value = PresenceFlag;
+
+    fn enabled_for_staff() -> bool {
+        false
+    }
 }
 register_feature_flag!(AutoWatchFeatureFlag);
 

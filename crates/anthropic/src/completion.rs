@@ -300,6 +300,7 @@ pub fn into_anthropic(
                     "low" => Some(crate::Effort::Low),
                     "medium" => Some(crate::Effort::Medium),
                     "high" => Some(crate::Effort::High),
+                    "xhigh" => Some(crate::Effort::XHigh),
                     "max" => Some(crate::Effort::Max),
                     _ => None,
                 };

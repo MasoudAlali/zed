@@ -283,6 +283,10 @@ impl GitRepository for FakeGitRepository {
         .boxed()
     }
 
+    fn recent_commit_messages(&self, _count: usize) -> BoxFuture<'_, Result<Vec<String>>> {
+        async { Ok(Vec::new()) }.boxed()
+    }
+
     fn reset(
         &self,
         commit: String,
@@ -993,6 +997,7 @@ impl GitRepository for FakeGitRepository {
     fn stash_paths(
         &self,
         _paths: Vec<RepoPath>,
+        _message: Option<SharedString>,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         unimplemented!()

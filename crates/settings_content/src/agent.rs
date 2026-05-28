@@ -82,6 +82,10 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub button: Option<bool>,
+    /// Whether to show the threads sidebar toggle button in the status bar.
+    ///
+    /// Default: true
+    pub sidebar_button: Option<bool>,
     /// Where to dock the agent panel.
     ///
     /// Default: left

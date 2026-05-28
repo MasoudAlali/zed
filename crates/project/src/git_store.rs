@@ -2415,10 +2415,11 @@ impl GitStore {
             .into_iter()
             .map(|path| RepoPath::new(&path))
             .collect::<Result<Vec<_>>>()?;
+        let message = envelope.payload.message.map(SharedString::from);
 
         repository_handle
             .update(&mut cx, |repository_handle, cx| {
-                repository_handle.stash_entries(entries, cx)
+                repository_handle.stash_entries(entries, message, cx)
             })
             .await?;
 
@@ -5214,6 +5215,24 @@ impl Repository {
         })
     }
 
+    pub fn recent_commit_messages(
+        &mut self,
+        count: usize,
+    ) -> oneshot::Receiver<Result<Vec<String>>> {
+        self.send_job(
+            "recent_commit_messages",
+            None,
+            move |git_repo, _cx| async move {
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.recent_commit_messages(count).await
+                    }
+                    RepositoryState::Remote(_) => Ok(Vec::new()),
+                }
+            },
+        )
+    }
+
     pub fn load_commit_diff(&mut self, commit: String) -> oneshot::Receiver<Result<CommitDiff>> {
         let id = self.id;
         self.send_job("load_commit_diff", None, move |git_repo, cx| async move {
@@ -6214,15 +6233,20 @@ impl Repository {
         })
     }
 
-    pub fn stash_all(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
+    pub fn stash_all(
+        &mut self,
+        message: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
         let to_stash = self.cached_status().map(|entry| entry.repo_path).collect();
 
-        self.stash_entries(to_stash, cx)
+        self.stash_entries(to_stash, message, cx)
     }
 
     pub fn stash_entries(
         &mut self,
         entries: Vec<RepoPath>,
+        message: Option<SharedString>,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let id = self.id;
@@ -6235,7 +6259,7 @@ impl Repository {
                             backend,
                             environment,
                             ..
-                        }) => backend.stash_paths(entries, environment).await,
+                        }) => backend.stash_paths(entries, message, environment).await,
                         RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                             client
                                 .request(proto::Stash {
@@ -6245,6 +6269,7 @@ impl Repository {
                                         .into_iter()
                                         .map(|repo_path| repo_path.to_proto())
                                         .collect(),
+                                    message: message.map(|m| m.to_string()),
                                 })
                                 .await?;
                             Ok(())

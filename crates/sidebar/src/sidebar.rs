@@ -95,7 +95,7 @@ gpui::actions!(
     ]
 );
 
-const DEFAULT_WIDTH: Pixels = px(300.0);
+const DEFAULT_WIDTH: Pixels = px(280.0);
 const MIN_WIDTH: Pixels = px(200.0);
 const MAX_WIDTH: Pixels = px(800.0);
 
@@ -7130,6 +7130,10 @@ impl WorkspaceSidebar for Sidebar {
 
     fn has_notifications(&self, _cx: &App) -> bool {
         !self.contents.notified_threads.is_empty() || !self.contents.notified_terminals.is_empty()
+    }
+
+    fn show_toggle_button(&self, cx: &App) -> bool {
+        AgentSettings::get_global(cx).sidebar_button
     }
 
     fn is_threads_list_view_active(&self) -> bool {

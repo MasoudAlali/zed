@@ -1,6 +1,6 @@
 use crate::commit_view::CommitView;
 use editor::hover_markdown_style;
-use futures::Future;
+use futures::{Future, FutureExt as _};
 use git::blame::BlameEntry;
 use git::repository::CommitSummary;
 use git::{GitRemote, commit::ParsedCommitMessage};
@@ -65,10 +65,44 @@ impl<'a> CommitAvatar<'a> {
     }
 
     pub fn render(&'a self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let url = self.avatar(window, cx);
+        self.render_from_url(url, window, cx)
+    }
+
+    /// Like [`render`], but uses `get_asset` instead of `use_asset` so it does not
+    /// register a reload notification on the current view. Use this in list renderers
+    /// where many commits are shown, to avoid stealing the notification registration
+    /// from tooltip views that need to react when the asset loads.
+    pub fn render_cached(&'a self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let url = self
+            .remote
+            .filter(|remote| remote.host_supports_avatars())
+            .and_then(|remote| {
+                window
+                    .get_asset::<CommitAvatarAsset>(
+                        &CommitAvatarAsset::new(
+                            remote.clone(),
+                            self.sha.clone(),
+                            self.author_email.clone(),
+                        ),
+                        cx,
+                    )
+                    .flatten()
+            })
+            .map(|url| Avatar::new(url.to_string()));
+        self.render_from_url(url, window, cx)
+    }
+
+    fn render_from_url(
+        &'a self,
+        avatar: Option<Avatar>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         let border_color = cx.theme().colors().border_variant;
         let border_width = px(1.);
 
-        match self.avatar(window, cx) {
+        match avatar {
             None => {
                 let container_size = self
                     .size
@@ -108,11 +142,29 @@ impl<'a> CommitAvatar<'a> {
         let remote = self
             .remote
             .filter(|remote| remote.host_supports_avatars())?;
-        let avatar_url =
+        let asset_source =
             CommitAvatarAsset::new(remote.clone(), self.sha.clone(), self.author_email.clone());
 
-        let url = window.use_asset::<CommitAvatarAsset>(&avatar_url, cx)??;
-        Some(Avatar::new(url.to_string()))
+        // Use fetch_asset directly so we can unconditionally register a notification
+        // for the current view. window.use_asset only notifies the first caller (is_first),
+        // which may be a list renderer that called get_asset earlier — leaving tooltips
+        // permanently stuck on the placeholder.
+        let (task, _) = cx.fetch_asset::<CommitAvatarAsset>(&asset_source);
+        match task.clone().now_or_never() {
+            Some(url) => url.map(|url| Avatar::new(url.to_string())),
+            None => {
+                let entity_id = window.current_view();
+                window
+                    .spawn(cx, async move |cx| {
+                        task.await;
+                        cx.on_next_frame(move |_, cx| {
+                            cx.notify(entity_id);
+                        });
+                    })
+                    .detach();
+                None
+            }
+        }
     }
 }
 

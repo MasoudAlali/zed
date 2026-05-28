@@ -5501,7 +5501,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn git_panel_section() -> [SettingsPageItem; 15] {
+    fn git_panel_section() -> [SettingsPageItem; 16] {
         [
             SettingsPageItem::SectionHeader("Git Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -5692,6 +5692,28 @@ fn panels_page() -> SettingsPage {
                             .git_panel
                             .get_or_insert_default()
                             .diff_stats = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Pull Before Push",
+                description: "When using Commit & Push, pull with rebase before pushing (commit → git pull --rebase → push).",
+                field: Box::new(SettingField {
+                    json_path: Some("git_panel.pull_before_push"),
+                    pick: |settings_content| {
+                        settings_content
+                            .git_panel
+                            .as_ref()?
+                            .pull_before_push
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .git_panel
+                            .get_or_insert_default()
+                            .pull_before_push = value;
                     },
                 }),
                 metadata: None,

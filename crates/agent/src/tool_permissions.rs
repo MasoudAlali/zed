@@ -570,6 +570,7 @@ mod tests {
         AgentSettings {
             enabled: true,
             button: true,
+            sidebar_button: true,
             dock: DockPosition::Right,
             flexible: true,
             default_width: px(300.),

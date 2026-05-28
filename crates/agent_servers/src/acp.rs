@@ -3840,7 +3840,7 @@ mod tests {
 fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
     let context_server_store = project.read(cx).context_server_store().read(cx);
     let is_local = project.read(cx).is_local();
-    context_server_store
+    let mut servers: Vec<acp::McpServer> = context_server_store
         .configured_server_ids()
         .iter()
         .filter_map(|id| {
@@ -3882,7 +3882,42 @@ fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpS
                 _ => None,
             }
         })
-        .collect()
+        .collect();
+
+    if let Some(socket_path) = database_core::get_mcp_socket_path() {
+        if socket_path.exists() {
+            // Bridge stdin/stdout to the Unix domain socket for MCP protocol.
+            // The socket path is passed as sys.argv[1] to avoid shell injection.
+            const UNIX_SOCKET_BRIDGE: &str = concat!(
+                "import socket,sys,threading\n",
+                "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n",
+                "s.settimeout(5)\n",
+                "s.connect(sys.argv[1])\n",
+                "s.settimeout(None)\n",
+                "def w():\n",
+                " while True:\n",
+                "  d=s.recv(65536)\n",
+                "  if not d:break\n",
+                "  sys.stdout.buffer.write(d);sys.stdout.buffer.flush()\n",
+                " import os;os._exit(0)\n",
+                "threading.Thread(target=w,daemon=True).start()\n",
+                "while True:\n",
+                " l=sys.stdin.buffer.readline()\n",
+                " if not l:break\n",
+                " s.sendall(l)\n",
+            );
+            servers.push(acp::McpServer::Stdio(
+                acp::McpServerStdio::new("zed-database".to_string(), "python3").args(vec![
+                    "-u".to_string(),
+                    "-c".to_string(),
+                    UNIX_SOCKET_BRIDGE.to_string(),
+                    socket_path.to_string_lossy().to_string(),
+                ]),
+            ));
+        }
+    }
+
+    servers
 }
 
 fn config_state(

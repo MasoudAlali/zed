@@ -94,6 +94,8 @@ copilot_ui.workspace = true
 crashes.workspace = true
 csv_preview.workspace = true
 dap_adapters.workspace = true
+database_ai.workspace = true
+database_ui.workspace = true
 db.workspace = true
 debug_adapter_extension.workspace = true
 debugger_tools.workspace = true
@@ -138,6 +140,7 @@ inspector_ui.workspace = true
 install_cli.workspace = true
 journal.workspace = true
 json_schema_store.workspace = true
+knip.workspace = true
 keymap_editor.workspace = true
 language.workspace = true
 language_extension.workspace = true
@@ -296,7 +299,7 @@ osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["zed"]
 
-[package.metadata.bundle-stable]
+[package.metadata.bundle]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
 identifier = "dev.zed.Zed"
 name = "Zed"

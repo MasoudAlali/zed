@@ -1,0 +1,10 @@
+id = "knip"
+name = "Knip"
+description = "Find unused files, dependencies, and exports in JS/TS projects via knip."
+version = "0.1.0"
+schema_version = 1
+authors = ["Masoud"]
+repository = "https://github.com/user/zed-knip"
+
+[language_servers.knip-lsp]
+languages = ["TypeScript", "TSX", "JavaScript", "JSON"]

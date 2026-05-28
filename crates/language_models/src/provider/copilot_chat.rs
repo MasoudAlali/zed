@@ -5,7 +5,6 @@ use std::sync::Arc;
 use anthropic::AnthropicModelMode;
 use anyhow::{Result, anyhow};
 use collections::HashMap;
-use copilot::{GlobalCopilotAuth, Status};
 use copilot_chat::responses as copilot_responses;
 use copilot_chat::{
     ChatLocation, ChatMessage, ChatMessageContent, ChatMessagePart, CopilotChat,
@@ -145,7 +144,7 @@ impl LanguageModelProvider for CopilotChatLanguageModelProvider {
             return Task::ready(Ok(()));
         };
 
-        let Some(copilot) = GlobalCopilotAuth::try_global(cx).cloned() else {
+        let Some(copilot_chat) = CopilotChat::global(cx) else {
             return Task::ready(Err(anyhow!(concat!(
                 "Copilot must be enabled for Copilot Chat to work. ",
                 "Please enable Copilot and try again."
@@ -153,27 +152,8 @@ impl LanguageModelProvider for CopilotChatLanguageModelProvider {
             .into()));
         };
 
-        let err = match copilot.0.read(cx).status() {
-            Status::Authorized => return Task::ready(Ok(())),
-            Status::Disabled => anyhow!(
-                "Copilot must be enabled for Copilot Chat to work. Please enable Copilot and try again."
-            ),
-            Status::Error(err) => anyhow!(format!(
-                "Received the following error while signing into Copilot: {err}"
-            )),
-            Status::Starting { task: _ } => anyhow!(
-                "Copilot is still starting, please wait for Copilot to start then try again"
-            ),
-            Status::Unauthorized => anyhow!(
-                "Unable to authorize with Copilot. Please make sure that you have an active Copilot and Copilot Chat subscription."
-            ),
-            Status::SignedOut { .. } => {
-                anyhow!("You have signed out of Copilot. Please sign in to Copilot and try again.")
-            }
-            Status::SigningIn { prompt: _ } => anyhow!("Still signing into Copilot..."),
-        };
-
-        Task::ready(Err(err.into()))
+        let task = copilot_chat.update(cx, |copilot_chat, cx| copilot_chat.sign_in(cx));
+        cx.spawn(async move |_| task.await.map_err(Into::into))
     }
 
     fn configuration_view(
@@ -196,10 +176,11 @@ impl LanguageModelProvider for CopilotChatLanguageModelProvider {
         .into()
     }
 
-    fn reset_credentials(&self, _cx: &mut App) -> Task<Result<()>> {
-        Task::ready(Err(anyhow!(
-            "Signing out of GitHub Copilot Chat is currently not supported."
-        )))
+    fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {
+        let Some(copilot_chat) = CopilotChat::global(cx) else {
+            return Task::ready(Ok(()));
+        };
+        copilot_chat.update(cx, |copilot_chat, cx| copilot_chat.sign_out(cx))
     }
 }
 

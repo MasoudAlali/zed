@@ -31,9 +31,11 @@ use acp_thread::{
 use agent_client_protocol::schema as acp;
 use agent_skills::{
     MAX_SKILL_DESCRIPTIONS_SIZE, ProjectSkillGroup, Skill, SkillIndex, SkillLoadError,
-    SkillScopeId, SkillSource, SkillSummary, builtin_skills, global_skills_dir,
-    load_skills_from_directory, project_skills_relative_path,
+    SkillScopeId, SkillSource, SkillSummary, builtin_skills, global_skills_dirs,
+    load_skills_from_directory, project_skills_relative_paths,
 };
+#[cfg(test)]
+use agent_skills::global_skills_dir;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use collections::{HashMap, HashSet, IndexMap};
@@ -313,21 +315,20 @@ pub struct NativeAgent {
     /// [`Self::ensure_skills_scan_started`], which is called from the
     /// three agent-panel interaction points: input box focus, slash
     /// autocomplete, and conversation submit.
-    skills_state: SkillsState,
+    /// Per-directory state for each global skills root we discover. An
+    /// absent entry means the directory is idle (no scan or watch is
+    /// active). Roots come from [`global_skills_dirs`], which today
+    /// returns both `~/.claude/skills` and `~/.agents/skills`.
+    skills_states: HashMap<PathBuf, SkillsState>,
 }
 
-#[derive(Default)]
 enum SkillsState {
-    /// No scan or watch is active. A user-interaction trigger will kick
-    /// off a fresh scan.
-    #[default]
-    Idle,
-    /// A one-shot scan task is in flight. It checks whether
-    /// `~/.agents/skills/` exists; if so, transitions to `Watching`,
-    /// otherwise back to `Idle`.
+    /// A one-shot scan task is in flight for this directory. It checks
+    /// whether the directory exists; if so, transitions to `Watching`,
+    /// otherwise the entry is removed (back to idle).
     Scanning,
-    /// A watch task is observing `~/.agents/skills/`. It transitions
-    /// back to `Idle` if the watched directory itself is removed.
+    /// A watch task is observing this directory. The entry is removed
+    /// (back to idle) if the watched directory itself is removed.
     Watching,
 }
 
@@ -340,10 +341,11 @@ static RULES_FILE_REL_PATHS: LazyLock<Vec<Arc<RelPath>>> = LazyLock::new(|| {
         .collect()
 });
 
-static SKILLS_PREFIX: LazyLock<Option<Arc<RelPath>>> = LazyLock::new(|| {
-    RelPath::unix(project_skills_relative_path())
-        .ok()
-        .map(|path| path.into_arc())
+static SKILLS_PREFIXES: LazyLock<Vec<Arc<RelPath>>> = LazyLock::new(|| {
+    project_skills_relative_paths()
+        .iter()
+        .filter_map(|rel| RelPath::unix(rel).ok().map(|path| path.into_arc()))
+        .collect()
 });
 
 impl NativeAgent {
@@ -374,43 +376,49 @@ impl NativeAgent {
                 models: LanguageModels::new(cx),
                 fs,
                 _subscriptions: subscriptions,
-                skills_state: SkillsState::default(),
+                skills_states: HashMap::default(),
             }
         })
     }
 
-    /// Kicks off a one-time scan of the global skills directory if one
-    /// isn't already in progress and a watch isn't already active.
+    /// Kicks off a one-time scan of each configured global skills
+    /// directory that isn't already being scanned or watched.
     ///
-    /// Idempotent and cheap: returns immediately if a scan or watch is
-    /// already running. The expected callers are user-interaction events
-    /// from the agent panel (input focus, slash autocomplete, conversation
-    /// submit); firing this from any of them is equivalent and safe to
-    /// repeat.
+    /// Idempotent and cheap: skips any root that already has a scan or
+    /// watch task running. The expected callers are user-interaction
+    /// events from the agent panel (input focus, slash autocomplete,
+    /// conversation submit); firing this from any of them is equivalent
+    /// and safe to repeat.
     ///
-    /// The scan itself runs detached on the foreground executor. If
-    /// `~/.agents/skills/` exists it transitions state to
-    /// [`SkillsState::Watching`] and starts a recursive watch;
-    /// otherwise it transitions back to [`SkillsState::Idle`] so the
-    /// next trigger retries (covering the case where the user creates
-    /// the directory after the first scan).
+    /// Each scan runs detached on the foreground executor. If the root
+    /// exists, its state transitions to [`SkillsState::Watching`] and a
+    /// watch task starts; otherwise the entry is removed (back to idle)
+    /// so the next trigger retries (covering the case where the user
+    /// creates the directory after the first scan).
     pub fn ensure_skills_scan_started(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.skills_state, SkillsState::Idle) {
-            return;
+        for skills_dir in global_skills_dirs() {
+            if self.skills_states.contains_key(&skills_dir) {
+                continue;
+            }
+            self.skills_states
+                .insert(skills_dir.clone(), SkillsState::Scanning);
+            let fs = self.fs.clone();
+            cx.spawn(async move |this, cx| Self::run_skills_scan(this, fs, skills_dir, cx).await)
+                .detach();
         }
-        self.skills_state = SkillsState::Scanning;
-        let fs = self.fs.clone();
-        cx.spawn(async move |this, cx| Self::run_skills_scan(this, fs, cx).await)
-            .detach();
     }
 
-    async fn run_skills_scan(this: WeakEntity<Self>, fs: Arc<dyn Fs>, cx: &mut AsyncApp) {
-        let skills_dir = global_skills_dir();
+    async fn run_skills_scan(
+        this: WeakEntity<Self>,
+        fs: Arc<dyn Fs>,
+        skills_dir: PathBuf,
+        cx: &mut AsyncApp,
+    ) {
         if !fs.is_dir(&skills_dir).await {
             // Skills directory doesn't exist; revert state so the next
             // user trigger retries.
             let _ = this.update(cx, |this, _cx| {
-                this.skills_state = SkillsState::Idle;
+                this.skills_states.remove(&skills_dir);
             });
             return;
         }
@@ -425,7 +433,7 @@ impl NativeAgent {
                 async move |this, cx| Self::run_skills_watch(this, fs, skills_dir, cx).await
             })
             .detach();
-            this.skills_state = SkillsState::Watching;
+            this.skills_states.insert(skills_dir, SkillsState::Watching);
             for state in this.projects.values_mut() {
                 state.project_context_needs_refresh.send(()).ok();
             }
@@ -486,10 +494,11 @@ impl NativeAgent {
                     state.project_context_needs_refresh.send(()).ok();
                 }
                 if watched_root_removed {
-                    // Drop back to Idle so the next user trigger
-                    // retries the scan; the next trigger will rediscover
-                    // the directory if the user has recreated it.
-                    this.skills_state = SkillsState::Idle;
+                    // Drop back to idle (remove the entry) so the next
+                    // user trigger retries the scan; the next trigger
+                    // will rediscover the directory if the user has
+                    // recreated it.
+                    this.skills_states.remove(&skills_dir);
                 }
             });
             if updated.is_err() || watched_root_removed {
@@ -805,17 +814,21 @@ impl NativeAgent {
             })
             .collect::<Vec<_>>();
 
-        // Load global skills
+        // Load global skills from every configured root (`.agents/skills`
+        // and `.claude/skills`). The order returned by `global_skills_dirs()`
+        // is the conflict-resolution order: roots earlier in the list win
+        // same-name collisions inside the same scope.
         let global_skills_task = {
-            let global_skills_dir = global_skills_dir();
             let global_skills_fs = fs.clone();
             cx.background_spawn(async move {
-                load_skills_from_directory(
-                    &global_skills_fs,
-                    &global_skills_dir,
-                    SkillSource::Global,
-                )
-                .await
+                let mut combined = Vec::new();
+                for dir in global_skills_dirs() {
+                    combined.extend(
+                        load_skills_from_directory(&global_skills_fs, &dir, SkillSource::Global)
+                            .await,
+                    );
+                }
+                combined
             })
         };
 
@@ -852,22 +865,28 @@ impl NativeAgent {
                     let scan_complete = worktree_snapshot
                         .as_local()
                         .map(|local| local.scan_complete());
-                    let skills_dir = abs_path.join(project_skills_relative_path());
+                    let skills_dirs: Vec<PathBuf> = project_skills_relative_paths()
+                        .iter()
+                        .map(|rel| abs_path.join(rel))
+                        .collect();
                     let fs = fs.clone();
                     Some(
                         async move {
                             if let Some(scan_complete) = scan_complete {
                                 scan_complete.await;
                             }
-                            load_skills_from_directory(
-                                &fs,
-                                &skills_dir,
-                                SkillSource::ProjectLocal {
-                                    worktree_id: SkillScopeId(worktree_id.to_usize()),
-                                    worktree_root_name,
-                                },
-                            )
-                            .await
+                            let source = SkillSource::ProjectLocal {
+                                worktree_id: SkillScopeId(worktree_id.to_usize()),
+                                worktree_root_name,
+                            };
+                            let mut combined = Vec::new();
+                            for skills_dir in skills_dirs {
+                                combined.extend(
+                                    load_skills_from_directory(&fs, &skills_dir, source.clone())
+                                        .await,
+                                );
+                            }
+                            combined
                         }
                         .boxed(),
                     )
@@ -1062,9 +1081,9 @@ impl NativeAgent {
                     RULES_FILE_REL_PATHS
                         .iter()
                         .any(|rules_path| path_ref == rules_path.as_ref())
-                        || SKILLS_PREFIX
-                            .as_ref()
-                            .is_some_and(|prefix| path_ref.starts_with(prefix))
+                        || SKILLS_PREFIXES
+                            .iter()
+                            .any(|prefix| path_ref.starts_with(prefix))
                 }) {
                     state.project_context_needs_refresh.send(()).ok();
                 }

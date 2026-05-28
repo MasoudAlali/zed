@@ -3,6 +3,7 @@ use copilot::{
     Copilot, GlobalCopilotAuth, Status,
     request::{self, PromptUserDeviceFlow},
 };
+use copilot_chat::{CopilotChat, CopilotChatStatus};
 use gpui::{
     App, ClipboardItem, Context, DismissEvent, Element, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement, IntoElement, MouseDownEvent, ParentElement, Render, Styled,
@@ -464,9 +465,11 @@ impl Render for CopilotCodeVerification {
 
 pub struct ConfigurationView {
     copilot_status: Option<Status>,
+    copilot_chat: Option<Entity<CopilotChat>>,
     is_authenticated: Box<dyn Fn(&mut App) -> bool + 'static>,
     edit_prediction: bool,
     _subscription: Option<Subscription>,
+    _chat_subscription: Option<Subscription>,
 }
 
 pub enum ConfigurationMode {
@@ -480,19 +483,28 @@ impl ConfigurationView {
         mode: ConfigurationMode,
         cx: &mut Context<Self>,
     ) -> Self {
+        let edit_prediction = matches!(mode, ConfigurationMode::EditPrediction);
+
+        // Edit prediction authenticates through the Copilot language server, while
+        // Copilot Chat drives its own GitHub device flow via [`CopilotChat`].
         let copilot = AppState::try_global(cx)
             .and_then(|state| GlobalCopilotAuth::try_get_or_init(state, cx));
+        let copilot_chat = (!edit_prediction).then(|| CopilotChat::global(cx)).flatten();
 
         Self {
             copilot_status: copilot.as_ref().map(|copilot| copilot.0.read(cx).status()),
             is_authenticated: Box::new(is_authenticated),
-            edit_prediction: matches!(mode, ConfigurationMode::EditPrediction),
+            edit_prediction,
             _subscription: copilot.as_ref().map(|copilot| {
                 cx.observe(&copilot.0, |this, model, cx| {
                     this.copilot_status = Some(model.read(cx).status());
                     cx.notify();
                 })
             }),
+            _chat_subscription: copilot_chat
+                .as_ref()
+                .map(|copilot_chat| cx.observe(copilot_chat, |_, _, cx| cx.notify())),
+            copilot_chat,
         }
     }
 }
@@ -652,34 +664,99 @@ impl ConfigurationView {
         }
     }
 
-    fn render_for_chat(&self) -> impl IntoElement {
+    fn render_chat_sign_in_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("sign_in", "Sign in to use GitHub Copilot")
+            .full_width()
+            .style(ButtonStyle::Outlined)
+            .start_icon(
+                Icon::new(IconName::Github)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .on_click(cx.listener(|this, _, _window, cx| {
+                if let Some(copilot_chat) = &this.copilot_chat {
+                    copilot_chat
+                        .update(cx, |copilot_chat, cx| copilot_chat.sign_in(cx))
+                        .detach_and_log_err(cx);
+                }
+            }))
+    }
+
+    fn render_chat_device_code(
+        &self,
+        user_code: &str,
+        verification_uri: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let copied = cx
+            .read_from_clipboard()
+            .map(|item| item.text().as_deref() == Some(user_code))
+            .unwrap_or(false);
+        let verification_uri = verification_uri.to_string();
+
+        v_flex()
+            .gap_2()
+            .child(Label::new(
+                "Enter this code at GitHub to finish signing in to Copilot Chat:",
+            ))
+            .child(
+                ButtonLike::new("copy-code")
+                    .full_width()
+                    .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                    .size(ButtonSize::Medium)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .p_1()
+                            .justify_between()
+                            .child(Label::new(user_code.to_string()))
+                            .child(Label::new(if copied { "Copied!" } else { "Copy" })),
+                    )
+                    .on_click({
+                        let user_code = user_code.to_string();
+                        move |_, window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(user_code.clone()));
+                            window.refresh();
+                        }
+                    }),
+            )
+            .child(
+                Button::new("open-github", "Open GitHub")
+                    .full_width()
+                    .style(ButtonStyle::Outlined)
+                    .size(ButtonSize::Medium)
+                    .on_click(move |_, _, cx| cx.open_url(&verification_uri)),
+            )
+    }
+
+    fn render_for_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let start_label = "To use Zed's agent with GitHub Copilot, you need to be logged in to GitHub. Note that your GitHub account must have an active Copilot Chat subscription.";
         let no_status_label = "Copilot Chat requires an active GitHub Copilot subscription. Please ensure Copilot is configured and try again, or use a different LLM provider.";
 
-        if let Some(msg) = self.loading_message() {
-            v_flex()
-                .gap_2()
-                .child(Label::new(start_label))
-                .child(self.render_loading_button(msg, false))
-                .into_any_element()
-        } else if self.is_error() {
-            v_flex()
-                .gap_2()
-                .child(Label::new(ERROR_LABEL))
-                .child(self.render_reinstall_button(false))
-                .into_any_element()
-        } else if self.has_no_status() {
-            v_flex()
+        let Some(status) = self
+            .copilot_chat
+            .as_ref()
+            .map(|copilot_chat| copilot_chat.read(cx).status())
+        else {
+            return v_flex()
                 .gap_2()
                 .child(Label::new(no_status_label))
-                .child(self.render_sign_in_button(false))
-                .into_any_element()
-        } else {
-            v_flex()
+                .into_any_element();
+        };
+
+        match status {
+            CopilotChatStatus::SigningIn {
+                user_code,
+                verification_uri,
+            } => self
+                .render_chat_device_code(&user_code, &verification_uri, cx)
+                .into_any_element(),
+            // Authorized is handled by the caller via the `is_authenticated` check.
+            CopilotChatStatus::Authorized | CopilotChatStatus::SignedOut => v_flex()
                 .gap_2()
                 .child(Label::new(start_label))
-                .child(self.render_sign_in_button(false))
-                .into_any_element()
+                .child(self.render_chat_sign_in_button(cx))
+                .into_any_element(),
         }
     }
 }
@@ -689,11 +766,19 @@ impl Render for ConfigurationView {
         let is_authenticated = &self.is_authenticated;
 
         if is_authenticated(cx) {
+            let edit_prediction = self.edit_prediction;
+            let copilot_chat = self.copilot_chat.clone();
             return ConfiguredApiCard::new("Authorized")
                 .button_label("Sign Out")
-                .on_click(|_, window, cx| {
-                    if let Some(auth) = GlobalCopilotAuth::try_global(cx) {
-                        initiate_sign_out(auth.0.clone(), window, cx);
+                .on_click(move |_, window, cx| {
+                    if edit_prediction {
+                        if let Some(auth) = GlobalCopilotAuth::try_global(cx) {
+                            initiate_sign_out(auth.0.clone(), window, cx);
+                        }
+                    } else if let Some(copilot_chat) = &copilot_chat {
+                        copilot_chat
+                            .update(cx, |copilot_chat, cx| copilot_chat.sign_out(cx))
+                            .detach_and_log_err(cx);
                     }
                 })
                 .into_any_element();
@@ -702,7 +787,7 @@ impl Render for ConfigurationView {
         if self.edit_prediction {
             self.render_for_edit_prediction().into_any_element()
         } else {
-            self.render_for_chat().into_any_element()
+            self.render_for_chat(cx).into_any_element()
         }
     }
 }

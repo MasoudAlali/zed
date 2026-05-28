@@ -46,6 +46,9 @@ members = [
     "crates/csv_preview",
     "crates/dap",
     "crates/dap_adapters",
+    "crates/database_ai",
+    "crates/database_core",
+    "crates/database_ui",
     "crates/db",
     "crates/debug_adapter_extension",
     "crates/debugger_tools",
@@ -111,6 +114,7 @@ members = [
     "crates/install_cli",
     "crates/journal",
     "crates/json_schema_store",
+    "crates/knip",
     "crates/keymap_editor",
     "crates/language",
     "crates/language_core",
@@ -246,6 +250,7 @@ members = [
 
     "extensions/glsl",
     "extensions/html",
+    "extensions/knip",
     "extensions/proto",
     "extensions/test-extension",
 
@@ -316,6 +321,9 @@ crossbeam = "0.8.4"
 csv_preview = { path = "crates/csv_preview"}
 dap = { path = "crates/dap" }
 dap_adapters = { path = "crates/dap_adapters" }
+database_ai = { path = "crates/database_ai" }
+database_core = { path = "crates/database_core" }
+database_ui = { path = "crates/database_ui" }
 db = { path = "crates/db" }
 debug_adapter_extension = { path = "crates/debug_adapter_extension" }
 debugger_tools = { path = "crates/debugger_tools" }
@@ -372,6 +380,7 @@ inspector_ui = { path = "crates/inspector_ui" }
 install_cli = { path = "crates/install_cli" }
 journal = { path = "crates/journal" }
 json_schema_store = { path = "crates/json_schema_store" }
+knip = { path = "crates/knip" }
 keymap_editor = { path = "crates/keymap_editor" }
 language = { path = "crates/language" }
 language_core = { path = "crates/language_core" }
@@ -636,6 +645,7 @@ markup5ever_rcdom = "0.3.0"
 metal = "0.33"
 minidumper = "0.9"
 moka = { version = "0.12.10", features = ["sync"] }
+mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
 nanoid = "0.4"
 nbformat = "1.2.0"
 nix = "0.29"
@@ -700,6 +710,7 @@ pulldown-cmark = { version = "0.13.0", default-features = false }
 quick-xml = "0.38"
 quote = "1.0.9"
 rand = "0.9"
+redis = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager"] }
 rayon = "1.8"
 regex = "1.5"
 # WARNING: If you change this, you must also publish a new version of zed-reqwest to crates.io
@@ -716,9 +727,11 @@ rsa = "0.9.6"
 runtimelib = { version = "1.4.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
 ] }
+rust_xlsxwriter = "0.79"
 rust-embed = { version = "8.11", features = ["include-exclude"] }
 rustc-hash = "2.1.0"
 rustls = { version = "0.23.26" }
+rustls-pemfile = "2"
 rustls-platform-verifier = "0.5.0"
 # WARNING: If you change this, you must also publish a new version of zed-scap to crates.io
 scap = { git = "https://github.com/zed-industries/scap", rev = "4afea48c3b002197176fb19cd0f9b180dd36eaac", default-features = false, package = "zed-scap", version = "0.0.8-zed" }
@@ -762,6 +775,8 @@ time = { version = "0.3", features = [
 ] }
 tiny_http = "0.12"
 tokio = { version = "1" }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+tokio-postgres-rustls = "0.12"
 tokio-socks = { version = "0.5.2", default-features = false, features = [
     "futures-io",
     "tokio",

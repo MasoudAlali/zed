@@ -139,6 +139,7 @@ impl WindowLayout {
 pub struct AgentSettings {
     pub enabled: bool,
     pub button: bool,
+    pub sidebar_button: bool,
     pub dock: DockPosition,
     pub flexible: bool,
     pub sidebar_side: SidebarDockPosition,
@@ -632,6 +633,7 @@ impl Settings for AgentSettings {
         Self {
             enabled: agent.enabled.unwrap(),
             button: agent.button.unwrap(),
+            sidebar_button: agent.sidebar_button.unwrap(),
             dock: agent.dock.unwrap(),
             sidebar_side: agent.sidebar_side.unwrap(),
             default_width: px(agent.default_width.unwrap()),

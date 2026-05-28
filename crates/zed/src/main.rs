@@ -706,6 +706,7 @@ fn main() {
         );
         language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
         acp_tools::init(cx);
+        database_ai::init(cx);
         zed::telemetry_log::init(cx);
         zed::remote_debug::init(cx);
         edit_prediction_ui::init(cx);
@@ -777,8 +778,10 @@ fn main() {
         call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         collab_ui::init(&app_state, cx);
+        database_ui::init(cx);
         git_ui::init(cx);
         git_graph::init(cx);
+        knip::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
         csv_preview::init(cx);

@@ -8,8 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use util::paths::component_matches_ignore_ascii_case;
 
-/// First segment of the skills directory path: `.agents`.
+/// First segment of the spec-defined skills directory path: `.agents`.
 pub const AGENTS_DIR_NAME: &str = ".agents";
+
+/// First segment of the Claude-compatible skills directory path: `.claude`.
+///
+/// We additionally discover skills under `.claude/skills/` so users with
+/// existing Claude Code skill collections don't have to copy or symlink
+/// them into `.agents/skills/`.
+pub const CLAUDE_DIR_NAME: &str = ".claude";
 
 /// Second segment of the skills directory path: `skills`.
 pub const SKILLS_DIR_NAME: &str = "skills";
@@ -690,10 +697,44 @@ pub fn global_skills_dir() -> PathBuf {
         .join(SKILLS_DIR_NAME)
 }
 
+/// Returns the Claude-compatible global skills directory:
+/// `~/.claude/skills`. Scanned in addition to [`global_skills_dir`].
+pub fn global_claude_skills_dir() -> PathBuf {
+    paths::home_dir()
+        .join(CLAUDE_DIR_NAME)
+        .join(SKILLS_DIR_NAME)
+}
+
+/// Both global skill roots, in the order the loader should process them.
+///
+/// `.claude/skills` comes first so that when a skill with the same name
+/// exists in both roots, the first-found-wins policy in
+/// [`apply_skill_overrides`](../agent/src/agent.rs) picks the `.claude`
+/// version. This is the fork-local override choice for users who keep
+/// their primary skill collection under `.claude/skills`.
+pub fn global_skills_dirs() -> [PathBuf; 2] {
+    [global_claude_skills_dir(), global_skills_dir()]
+}
+
 /// Project-local skills live at this path relative to a worktree root,
 /// e.g. `<worktree>/.agents/skills/<skill>/SKILL.md`.
 pub fn project_skills_relative_path() -> &'static str {
     ".agents/skills"
+}
+
+/// Claude-compatible project-local skills path: `.claude/skills`.
+pub fn project_claude_skills_relative_path() -> &'static str {
+    ".claude/skills"
+}
+
+/// Both project-local skill roots (relative to a worktree), in the
+/// order the loader should process them. See [`global_skills_dirs`] for
+/// why `.claude/skills` comes first.
+pub fn project_skills_relative_paths() -> [&'static str; 2] {
+    [
+        project_claude_skills_relative_path(),
+        project_skills_relative_path(),
+    ]
 }
 
 /// Returns `true` if `path` looks like it points into an agent skills
@@ -716,13 +757,30 @@ pub fn project_skills_relative_path() -> &'static str {
 /// silently letting the agent overwrite a `.agents/skills` tree the user
 /// didn't expect to be touched is unsafe.
 pub fn is_agents_skills_path(path: &Path) -> bool {
+    contains_consecutive_components(path, AGENTS_DIR_NAME, SKILLS_DIR_NAME)
+}
+
+/// Like [`is_agents_skills_path`] but matches `.claude/skills` instead
+/// of `.agents/skills`. Used together with [`is_agents_skills_path`] to
+/// classify either root as sensitive.
+pub fn is_claude_skills_path(path: &Path) -> bool {
+    contains_consecutive_components(path, CLAUDE_DIR_NAME, SKILLS_DIR_NAME)
+}
+
+/// Returns `true` if `path` points into either skill root (`.agents/skills`
+/// or `.claude/skills`).
+pub fn is_skills_path(path: &Path) -> bool {
+    is_agents_skills_path(path) || is_claude_skills_path(path)
+}
+
+fn contains_consecutive_components(path: &Path, first: &str, second: &str) -> bool {
     let mut components = path.components().map(|c| c.as_os_str());
     let Some(mut prev) = components.next() else {
         return false;
     };
     for curr in components {
-        if component_matches_ignore_ascii_case(prev, AGENTS_DIR_NAME)
-            && component_matches_ignore_ascii_case(curr, SKILLS_DIR_NAME)
+        if component_matches_ignore_ascii_case(prev, first)
+            && component_matches_ignore_ascii_case(curr, second)
         {
             return true;
         }

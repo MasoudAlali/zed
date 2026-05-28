@@ -314,6 +314,20 @@ enum Section {
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct GitHeaderEntry {
     header: Section,
+    aggregate_diff_stat: Option<DiffStat>,
+}
+
+fn aggregate_diff_stat(entries: &[GitStatusEntry]) -> Option<DiffStat> {
+    let mut total = DiffStat::default();
+    let mut any = false;
+    for entry in entries {
+        if let Some(stat) = entry.diff_stat {
+            total.added = total.added.saturating_add(stat.added);
+            total.deleted = total.deleted.saturating_add(stat.deleted);
+            any = true;
+        }
+    }
+    any.then_some(total)
 }
 
 impl GitHeaderEntry {
@@ -2093,27 +2107,28 @@ impl GitPanel {
         .detach();
     }
 
-    pub fn stash_all(&mut self, _: &StashAll, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn stash_all(&mut self, _: &StashAll, window: &mut Window, cx: &mut Context<Self>) {
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
+        let default_message = self
+            .commit_editor
+            .read(cx)
+            .text(cx)
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
 
-        cx.spawn({
-            async move |this, cx| {
-                let stash_task = active_repository
-                    .update(cx, |repo, cx| repo.stash_all(cx))
-                    .await;
-                this.update(cx, |this, cx| {
-                    stash_task
-                        .map_err(|e| {
-                            this.show_error_toast("stash", e, cx);
-                        })
-                        .ok();
-                    cx.notify();
-                })
-            }
-        })
-        .detach();
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, |window, cx| {
+                crate::StashAllModal::new(default_message, active_repository, window, cx)
+            });
+        });
     }
 
     pub fn commit_message_buffer(&self, cx: &App) -> Entity<Buffer> {
@@ -3873,9 +3888,13 @@ impl GitPanel {
                         continue;
                     }
 
+                    let aggregate_diff_stat = aggregate_diff_stat(&entries);
                     push_entry(
                         self,
-                        GitListEntry::Header(GitHeaderEntry { header: section }),
+                        GitListEntry::Header(GitHeaderEntry {
+                            header: section,
+                            aggregate_diff_stat,
+                        }),
                         true,
                         Some(&mut tree_state.logical_indices),
                     );
@@ -3904,9 +3923,13 @@ impl GitPanel {
                     }
 
                     if section != Section::Tracked || !sort_by_path {
+                        let aggregate_diff_stat = aggregate_diff_stat(&entries);
                         push_entry(
                             self,
-                            GitListEntry::Header(GitHeaderEntry { header: section }),
+                            GitListEntry::Header(GitHeaderEntry {
+                                header: section,
+                                aggregate_diff_stat,
+                            }),
                             true,
                             None,
                         );
@@ -5894,6 +5917,9 @@ impl GitPanel {
         let toggle_state = self.header_state(header.header);
         let section = header.header;
         let weak = cx.weak_entity();
+        let diff_stat = header.aggregate_diff_stat.filter(|_| {
+            GitPanelSettings::get_global(cx).diff_stats
+        });
 
         h_flex()
             .id(id)
@@ -5909,9 +5935,20 @@ impl GitPanel {
             .border_1()
             .border_r_2()
             .child(
-                Label::new(header.title())
-                    .color(Color::Muted)
-                    .size(LabelSize::Small),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Label::new(header.title())
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                    )
+                    .when_some(diff_stat, |this, stat| {
+                        this.child(ui::DiffStat::new(
+                            ElementId::Name(format!("header_{}_diff_stat", ix).into()),
+                            stat.added as usize,
+                            stat.deleted as usize,
+                        ))
+                    }),
             )
             .child(
                 Checkbox::new(checkbox_id, toggle_state)
@@ -5926,7 +5963,10 @@ impl GitPanel {
 
                 weak.update(cx, |this, cx| {
                     this.toggle_staged_for_entry(
-                        &GitListEntry::Header(GitHeaderEntry { header: section }),
+                        &GitListEntry::Header(GitHeaderEntry {
+                            header: section,
+                            aggregate_diff_stat: None,
+                        }),
                         window,
                         cx,
                     );
@@ -7647,7 +7687,11 @@ mod tests {
             entries,
             [
                 GitListEntry::Header(GitHeaderEntry {
-                    header: Section::Tracked
+                    header: Section::Tracked,
+                    aggregate_diff_stat: Some(DiffStat {
+                        added: 2,
+                        deleted: 2,
+                    }),
                 }),
                 GitListEntry::Status(GitStatusEntry {
                     repo_path: repo_path("crates/gpui/gpui.rs"),
@@ -7680,7 +7724,11 @@ mod tests {
             entries,
             [
                 GitListEntry::Header(GitHeaderEntry {
-                    header: Section::Tracked
+                    header: Section::Tracked,
+                    aggregate_diff_stat: Some(DiffStat {
+                        added: 2,
+                        deleted: 2,
+                    }),
                 }),
                 GitListEntry::Status(GitStatusEntry {
                     repo_path: repo_path("crates/gpui/gpui.rs"),
@@ -7853,13 +7901,13 @@ mod tests {
         pretty_assertions::assert_matches!(
             entries.as_slice(),
             &[
-                Header(GitHeaderEntry { header: Section::Conflict }),
+                Header(GitHeaderEntry { header: Section::Conflict, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
-                Header(GitHeaderEntry { header: Section::Tracked }),
+                Header(GitHeaderEntry { header: Section::Tracked, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
-                Header(GitHeaderEntry { header: Section::New }),
+                Header(GitHeaderEntry { header: Section::New, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
@@ -7902,13 +7950,13 @@ mod tests {
         pretty_assertions::assert_matches!(
             entries.as_slice(),
             &[
-                Header(GitHeaderEntry { header: Section::Conflict }),
+                Header(GitHeaderEntry { header: Section::Conflict, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
-                Header(GitHeaderEntry { header: Section::Tracked }),
+                Header(GitHeaderEntry { header: Section::Tracked, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
-                Header(GitHeaderEntry { header: Section::New }),
+                Header(GitHeaderEntry { header: Section::New, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
@@ -7951,13 +7999,13 @@ mod tests {
         pretty_assertions::assert_matches!(
             entries.as_slice(),
             &[
-                Header(GitHeaderEntry { header: Section::Conflict }),
+                Header(GitHeaderEntry { header: Section::Conflict, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
-                Header(GitHeaderEntry { header: Section::Tracked }),
+                Header(GitHeaderEntry { header: Section::Tracked, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
-                Header(GitHeaderEntry { header: Section::New }),
+                Header(GitHeaderEntry { header: Section::New, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Staged, .. }),
@@ -8048,13 +8096,13 @@ mod tests {
         pretty_assertions::assert_matches!(
             entries.as_slice(),
             &[
-                Header(GitHeaderEntry { header: Section::Conflict }),
+                Header(GitHeaderEntry { header: Section::Conflict, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
-                Header(GitHeaderEntry { header: Section::Tracked }),
+                Header(GitHeaderEntry { header: Section::Tracked, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
-                Header(GitHeaderEntry { header: Section::New }),
+                Header(GitHeaderEntry { header: Section::New, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
                 Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
@@ -8673,7 +8721,8 @@ mod tests {
             assert!(matches!(
                 panel.entries.get(next_logical_idx),
                 Some(GitListEntry::Header(GitHeaderEntry {
-                    header: Section::New
+                    header: Section::New,
+                    ..
                 }))
             ));
 
