@@ -218,7 +218,7 @@ fn render_header_row(
                 .child(
                     div()
                         .id(gpui::ElementId::named_usize("header-label", col_index))
-                        .flex_grow()
+                        .flex_grow_1()
                         .h_full()
                         .flex()
                         .items_center()

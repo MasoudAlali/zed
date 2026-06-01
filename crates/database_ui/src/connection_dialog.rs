@@ -897,7 +897,7 @@ impl ConnectionDialog {
                     .gap_2()
                     .child(
                         div()
-                            .flex_grow()
+                            .flex_grow_1()
                             .child(Self::render_field("SSH Host", &self.ssh_host_field, cx)),
                     )
                     .child(
@@ -1087,7 +1087,7 @@ impl Render for ConnectionDialog {
                         .gap_2()
                         .child(
                             div()
-                                .flex_grow()
+                                .flex_grow_1()
                                 .child(Self::render_field("Host", &self.host_field, cx)),
                         )
                         .child(

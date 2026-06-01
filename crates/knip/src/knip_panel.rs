@@ -610,7 +610,7 @@ impl KnipPanel {
                                     h_flex()
                                         .gap_1()
                                         .overflow_hidden()
-                                        .flex_shrink()
+                                        .flex_shrink_1()
                                         .child(
                                             Label::new(name)
                                                 .size(LabelSize::Small)

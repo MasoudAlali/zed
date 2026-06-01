@@ -2050,7 +2050,7 @@ impl DatabasePanel {
                             h_flex()
                                 .gap_1()
                                 .overflow_hidden()
-                                .flex_grow()
+                                .flex_grow_1()
                                 .child(
                                     Icon::new(IconName::Star)
                                         .size(IconSize::XSmall)
@@ -2089,7 +2089,7 @@ impl DatabasePanel {
 
     fn render_empty_state(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .flex_grow()
+            .flex_grow_1()
             .items_center()
             .justify_center()
             .gap_2()
@@ -2420,7 +2420,7 @@ impl DatabasePanel {
             .unwrap_or(0);
 
         let mut section = v_flex()
-            .when(is_expanded, |this| this.flex_grow())
+            .when(is_expanded, |this| this.flex_grow_1())
             .when(!is_expanded, |this| this.flex_none())
             .w_full()
             .overflow_hidden()
@@ -2483,7 +2483,7 @@ impl DatabasePanel {
 
                 section = section.child(
                     v_flex()
-                        .flex_grow()
+                        .flex_grow_1()
                         .items_center()
                         .justify_center()
                         .p_2()
@@ -2692,7 +2692,7 @@ impl DatabasePanel {
         let has_results = self.query_result.is_some();
 
         let mut container = v_flex()
-            .flex_grow()
+            .flex_grow_1()
             .w_full()
             .overflow_hidden()
             .child(
@@ -2762,7 +2762,7 @@ impl DatabasePanel {
         if self.is_loading {
             container = container.child(
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2865,7 +2865,7 @@ impl DatabasePanel {
         } else {
             container = container.child(
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .items_center()
                     .justify_center()
                     .child(

@@ -695,7 +695,7 @@ impl QueryEditorTab {
                     }))
                     .tooltip(Tooltip::text("Execute and save results to file")),
             )
-            .child(div().flex_grow())
+            .child(div().flex_grow_1())
             .when(has_result, |el| {
                 el.child(
                     Button::new("copy_csv", "CSV")
@@ -739,7 +739,7 @@ impl QueryEditorTab {
     fn render_results_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if self.execution_state == ExecutionState::Executing {
             return div()
-                .flex_grow()
+                .flex_grow_1()
                 .items_center()
                 .justify_center()
                 .child(Label::new("Executing query...").color(Color::Muted))
@@ -748,7 +748,7 @@ impl QueryEditorTab {
 
         if let Some(error_text) = &self.query_error {
             return div()
-                .flex_grow()
+                .flex_grow_1()
                 .p_2()
                 .child(
                     Label::new(SharedString::from(error_text.clone()))
@@ -760,7 +760,7 @@ impl QueryEditorTab {
 
         if self.result_grid.read(cx).result().is_none() {
             return div()
-                .flex_grow()
+                .flex_grow_1()
                 .items_center()
                 .justify_center()
                 .child(

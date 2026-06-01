@@ -1385,7 +1385,7 @@ impl ResultGrid {
     fn render_grid_view(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(result) = &self.result else {
             return div()
-                .flex_grow()
+                .flex_grow_1()
                 .items_center()
                 .justify_center()
                 .child(
@@ -1411,7 +1411,7 @@ impl ResultGrid {
             };
 
             return div()
-                .flex_grow()
+                .flex_grow_1()
                 .p_2()
                 .child(Label::new(msg).color(Color::Success).size(LabelSize::Small))
                 .into_any_element();
@@ -1609,7 +1609,7 @@ impl ResultGrid {
     fn render_record_view(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(result) = &self.result else {
             return div()
-                .flex_grow()
+                .flex_grow_1()
                 .items_center()
                 .justify_center()
                 .child(
@@ -1623,7 +1623,7 @@ impl ResultGrid {
         let row_count = result.rows.len();
         if row_count == 0 {
             return div()
-                .flex_grow()
+                .flex_grow_1()
                 .items_center()
                 .justify_center()
                 .child(
@@ -1726,7 +1726,7 @@ impl ResultGrid {
                 )
                 .child(
                     div()
-                        .flex_grow()
+                        .flex_grow_1()
                         .px_2()
                         .py_1()
                         .flex()
@@ -1774,12 +1774,12 @@ impl ResultGrid {
         }
 
         v_flex()
-            .flex_grow()
+            .flex_grow_1()
             .child(navigation_bar)
             .child(
                 div()
                     .id("record-view-scroll")
-                    .flex_grow()
+                    .flex_grow_1()
                     .overflow_y_scroll()
                     .children(field_rows),
             )
@@ -2016,7 +2016,7 @@ impl ResultGrid {
                 )
                 .child(
                     div()
-                        .flex_grow()
+                        .flex_grow_1()
                         .child(editor.clone()),
                 )
                 .child(
@@ -2133,7 +2133,7 @@ impl ResultGrid {
                     }))
                     .tooltip(Tooltip::text("Record view")),
             )
-            .child(div().flex_grow())
+            .child(div().flex_grow_1())
             .child(
                 h_flex()
                     .gap_1()
@@ -2212,7 +2212,7 @@ impl Render for ResultGrid {
             }
         } else {
             div()
-                .flex_grow()
+                .flex_grow_1()
                 .items_center()
                 .justify_center()
                 .child(

@@ -356,7 +356,7 @@ pub fn render_schema_tree(
         }
     })
     .track_scroll(scroll_handle)
-    .flex_grow()
+    .flex_grow_1()
 }
 
 #[cfg(test)]

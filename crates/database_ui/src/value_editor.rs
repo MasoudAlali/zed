@@ -159,7 +159,7 @@ impl Render for ValueEditor {
             .child(
                 div()
                     .id("value-editor-content")
-                    .flex_grow()
+                    .flex_grow_1()
                     .max_h(px(300.0))
                     .overflow_y_scroll()
                     .border_1()
