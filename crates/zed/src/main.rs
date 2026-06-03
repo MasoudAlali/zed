@@ -769,7 +769,6 @@ fn main() {
         collab_ui::init(&app_state, cx);
         database_ui::init(cx);
         git_ui::init(cx);
-        git_graph::init(cx);
         knip::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
