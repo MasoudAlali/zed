@@ -98,12 +98,11 @@ impl FeatureFlagStore {
 
     /// Whether feature flag overrides from settings should be honored.
     ///
-    /// Overrides are a staff-only affordance, so non-staff users in release
-    /// builds can't flip flags through `settings.json` or the settings UI.
-    /// Debug builds are always treated as staff, and `ZED_DISABLE_STAFF`
-    /// forces the user to be treated as non-staff for testing.
+    /// This fork always honors overrides so the Feature Flags settings UI is
+    /// available in release builds regardless of staff status. `ZED_DISABLE_STAFF`
+    /// still forces the user to be treated as non-staff for testing.
     pub fn overrides_enabled(&self) -> bool {
-        (cfg!(debug_assertions) || self.staff) && !*ZED_DISABLE_STAFF
+        !*ZED_DISABLE_STAFF
     }
 
     pub fn server_flags_received(&self) -> bool {
