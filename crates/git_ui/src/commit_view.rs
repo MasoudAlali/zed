@@ -276,6 +276,7 @@ impl CommitView {
                 window,
                 cx,
             );
+            editor.disable_diff_hunk_controls(cx);
 
             editor.rhs_editor().update(cx, |editor, cx| {
                 editor.set_show_bookmarks(false, cx);
@@ -1191,6 +1192,7 @@ impl Item for CommitView {
                         window,
                         cx,
                     );
+                    editor.disable_diff_hunk_controls(cx);
                     editor.rhs_editor().update(cx, |editor, cx| {
                         editor.set_show_bookmarks(false, cx);
                         editor.set_show_breakpoints(false, cx);
