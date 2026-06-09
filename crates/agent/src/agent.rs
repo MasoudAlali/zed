@@ -291,6 +291,10 @@ impl LanguageModels {
         self.refresh_models_rx.clone()
     }
 
+    pub fn notify_model_selection_changed(&mut self) {
+        self.refresh_models_tx.send(()).ok();
+    }
+
     pub fn model_from_id(&self, model_id: &AgentModelId) -> Option<Arc<dyn LanguageModel>> {
         self.models.get(model_id).cloned()
     }
@@ -1645,6 +1649,7 @@ impl NativeAgent {
                         NativeAgentConnection::handle_thread_events(
                             events,
                             acp_thread.downgrade(),
+                            None,
                             cx,
                         )
                     })
@@ -1862,10 +1867,12 @@ impl NativeAgent {
                 }
             })?;
 
+            let connection = this.upgrade().map(NativeAgentConnection);
             cx.update(|cx| {
                 NativeAgentConnection::handle_thread_events(
                     response_stream,
                     acp_thread.downgrade(),
+                    connection,
                     cx,
                 )
             })
@@ -1895,10 +1902,12 @@ impl NativeAgent {
                 acp_thread.update_token_usage(None, cx);
             });
 
+            let connection = this.upgrade().map(NativeAgentConnection);
             cx.update(|cx| {
                 NativeAgentConnection::handle_thread_events(
                     response_stream,
                     acp_thread.downgrade(),
+                    connection,
                     cx,
                 )
             })
@@ -1997,10 +2006,12 @@ impl NativeAgent {
 
             let response_stream = thread.update(cx, |thread, cx| thread.send_existing(cx))?;
 
+            let connection = this.upgrade().map(NativeAgentConnection);
             cx.update(|cx| {
                 NativeAgentConnection::handle_thread_events(
                     response_stream,
                     acp_thread.downgrade(),
+                    connection,
                     cx,
                 )
             })
@@ -2092,12 +2103,18 @@ impl NativeAgentConnection {
             Ok(stream) => stream,
             Err(err) => return Task::ready(Err(err)),
         };
-        Self::handle_thread_events(response_stream, acp_thread.downgrade(), cx)
+        Self::handle_thread_events(
+            response_stream,
+            acp_thread.downgrade(),
+            Some(self.clone()),
+            cx,
+        )
     }
 
     fn handle_thread_events(
         mut events: mpsc::UnboundedReceiver<Result<ThreadEvent>>,
         acp_thread: WeakEntity<AcpThread>,
+        connection: Option<NativeAgentConnection>,
         cx: &App,
     ) -> Task<Result<acp::PromptResponse>> {
         cx.spawn(async move |cx| {
@@ -2171,6 +2188,17 @@ impl NativeAgentConnection {
                                 })?;
                             }
                             ThreadEvent::Retry(status) => {
+                                if acp_thread::refusal_fallback_model_from_meta(&status.meta)
+                                    .is_some()
+                                {
+                                    if let Some(connection) = &connection {
+                                        cx.update(|cx| {
+                                            connection.0.update(cx, |agent, _| {
+                                                agent.models.notify_model_selection_changed();
+                                            });
+                                        });
+                                    }
+                                }
                                 acp_thread.update(cx, |thread, cx| {
                                     thread.update_retry_status(status, cx)
                                 })?;
