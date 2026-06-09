@@ -22,6 +22,7 @@ use copilot::{Copilot, Reinstall, SignIn, SignOut};
 use credentials_provider::CredentialsProvider;
 use db::kvp::{Dismissable, KeyValueStore};
 use edit_prediction_context::{RelatedExcerptStore, RelatedExcerptStoreEvent, RelatedFile};
+use edit_prediction_types::EditPredictionRequestTrigger;
 use feature_flags::{FeatureFlag, FeatureFlagAppExt as _, PresenceFlag, register_feature_flag};
 use futures::{
     AsyncReadExt as _, FutureExt as _, StreamExt as _,
@@ -141,6 +142,10 @@ pub struct EditPredictionJumpsFeatureFlag;
 impl FeatureFlag for EditPredictionJumpsFeatureFlag {
     const NAME: &'static str = "edit_prediction_jumps";
     type Value = PresenceFlag;
+
+    fn enabled_for_staff() -> bool {
+        false
+    }
 }
 register_feature_flag!(EditPredictionJumpsFeatureFlag);
 
@@ -839,6 +844,28 @@ pub(crate) fn buffer_path_with_id_fallback(
         file.full_path(cx).into()
     } else {
         Path::new(&format!("untitled-{}", snapshot.remote_id())).into()
+    }
+}
+
+fn predict_edits_request_trigger_from_editor_trigger(
+    trigger: EditPredictionRequestTrigger,
+) -> PredictEditsRequestTrigger {
+    match trigger {
+        EditPredictionRequestTrigger::DiagnosticNavigation => {
+            PredictEditsRequestTrigger::DiagnosticNavigation
+        }
+        EditPredictionRequestTrigger::Explicit => PredictEditsRequestTrigger::Explicit,
+        EditPredictionRequestTrigger::BufferEdit => PredictEditsRequestTrigger::BufferEdit,
+        EditPredictionRequestTrigger::LSPCompletionAccepted => {
+            PredictEditsRequestTrigger::LSPCompletionAccepted
+        }
+        EditPredictionRequestTrigger::PredictionAccepted => {
+            PredictEditsRequestTrigger::PredictionAccepted
+        }
+        EditPredictionRequestTrigger::PredictionPartiallyAccepted => {
+            PredictEditsRequestTrigger::PredictionPartiallyAccepted
+        }
+        EditPredictionRequestTrigger::Other => PredictEditsRequestTrigger::Other,
     }
 }
 
@@ -2215,21 +2242,25 @@ impl EditPredictionStore {
         project: Entity<Project>,
         buffer: Entity<Buffer>,
         position: language::Anchor,
+        trigger: EditPredictionRequestTrigger,
         cx: &mut Context<Self>,
     ) {
+        let trigger = predict_edits_request_trigger_from_editor_trigger(trigger);
+
         self.queue_prediction_refresh(
             project.clone(),
-            PredictEditsRequestTrigger::Other,
+            trigger,
             buffer.entity_id(),
             cx,
             move |this, cx| {
                 let Some(request_task) = this
                     .update(cx, |this, cx| {
-                        this.request_prediction(
-                            &project,
-                            &buffer,
+                        this.request_prediction_internal(
+                            project.clone(),
+                            buffer.clone(),
                             position,
-                            PredictEditsRequestTrigger::Other,
+                            trigger,
+                            cx.has_flag::<EditPredictionJumpsFeatureFlag>(),
                             cx,
                         )
                     })
@@ -2333,11 +2364,12 @@ impl EditPredictionStore {
 
                     let Some(prediction_result) = this
                         .update(cx, |this, cx| {
-                            this.request_prediction(
-                                &project,
-                                &jump_buffer,
+                            this.request_prediction_internal(
+                                project.clone(),
+                                jump_buffer.clone(),
                                 jump_position,
                                 PredictEditsRequestTrigger::Diagnostics,
+                                cx.has_flag::<EditPredictionJumpsFeatureFlag>(),
                                 cx,
                             )
                         })?
@@ -2358,6 +2390,7 @@ impl EditPredictionStore {
                                 EditPredictionResult {
                                     id: prediction_result.id,
                                     prediction: Err(EditPredictionRejectReason::CurrentPreferred),
+                                    display_prediction: None,
                                     model_version: prediction_result.model_version,
                                     e2e_latency: prediction_result.e2e_latency,
                                 }
@@ -2454,7 +2487,8 @@ impl EditPredictionStore {
             request_trigger: PredictEditsRequestTrigger,
         ) -> &mut Option<(EntityId, Instant)> {
             match request_trigger {
-                PredictEditsRequestTrigger::Diagnostics => {
+                PredictEditsRequestTrigger::Diagnostics
+                | PredictEditsRequestTrigger::DiagnosticNavigation => {
                     &mut project_state.last_jump_prediction_refresh
                 }
                 _ => &mut project_state.last_edit_prediction_refresh,
@@ -2546,14 +2580,18 @@ impl EditPredictionStore {
                 let new_current_prediction = if !is_cancelled
                     && let Some((prediction_result, requested_by)) = new_prediction_result
                 {
-                    match prediction_result.prediction {
-                        Ok(prediction) => {
+                    match prediction_result {
+                        EditPredictionResult {
+                            prediction: Ok(prediction),
+                            e2e_latency,
+                            ..
+                        } => {
                             let new_prediction = CurrentEditPrediction {
                                 requested_by,
                                 prediction,
                                 was_shown: false,
                                 shown_with: None,
-                                e2e_latency: prediction_result.e2e_latency,
+                                e2e_latency,
                             };
 
                             if let Some(current_prediction) =
@@ -2583,15 +2621,39 @@ impl EditPredictionStore {
                                 Some(new_prediction)
                             }
                         }
-                        Err(reject_reason) => {
+                        EditPredictionResult {
+                            id,
+                            prediction: Err(reject_reason),
+                            display_prediction,
+                            model_version,
+                            e2e_latency,
+                        } => {
+                            let should_show_rejected_prediction = matches!(
+                                reject_reason,
+                                EditPredictionRejectReason::Empty
+                                    | EditPredictionRejectReason::InterpolatedEmpty
+                            );
+
                             this.reject_prediction(
-                                prediction_result.id,
+                                id,
                                 reject_reason,
                                 false,
-                                prediction_result.model_version,
-                                Some(prediction_result.e2e_latency),
+                                model_version,
+                                Some(e2e_latency),
                                 cx,
                             );
+
+                            if should_show_rejected_prediction
+                                && let Some(display_prediction) = display_prediction
+                            {
+                                this.shown_predictions.push_front(display_prediction);
+                                if this.shown_predictions.len() > 50
+                                    && let Some(completion) = this.shown_predictions.pop_back()
+                                {
+                                    this.rated_predictions.remove(&completion.id);
+                                }
+                            }
+
                             None
                         }
                     }
@@ -2769,7 +2831,8 @@ impl EditPredictionStore {
                         inputs.snapshot.clone(),
                         inputs.position,
                         match trigger {
-                            PredictEditsRequestTrigger::Diagnostics => {
+                            PredictEditsRequestTrigger::Diagnostics
+                            | PredictEditsRequestTrigger::DiagnosticNavigation => {
                                 JumpExampleTrigger::Diagnostic
                             }
                             _ => JumpExampleTrigger::Prediction,
@@ -2802,7 +2865,11 @@ impl EditPredictionStore {
             if prediction.is_none()
                 && allow_jump
                 && has_events
-                && !matches!(trigger, PredictEditsRequestTrigger::Diagnostics)
+                && !matches!(
+                    trigger,
+                    PredictEditsRequestTrigger::Diagnostics
+                        | PredictEditsRequestTrigger::DiagnosticNavigation
+                )
             {
                 this.update(cx, |this, cx| {
                     this.refresh_prediction_from_diagnostics(

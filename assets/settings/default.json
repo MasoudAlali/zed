@@ -521,14 +521,6 @@
     "button_layout": "platform_default",
   },
   "audio": {
-    // Automatically increase or decrease you microphone's volume. This affects how
-    // loud you sound to others.
-    //
-    // Recommended: off (default)
-    // Microphones are too quite in zed, until everyone is on experimental
-    // audio and has auto speaker volume on this will make you very loud
-    // compared to other speakers.
-    "experimental.auto_microphone_volume": false,
     // Select specific output audio device.
     // `null` means use system default.
     // Any unrecognized output device will fall back to system default.
@@ -1160,8 +1152,6 @@
           "skill": true,
           "spawn_agent": true,
           "terminal": true,
-          "update_plan": true,
-          "update_title": true,
           "search_web": true,
         },
       },
@@ -1187,8 +1177,6 @@
           "grep": true,
           "skill": true,
           "spawn_agent": true,
-          "update_plan": true,
-          "update_title": true,
           "search_web": true,
         },
       },

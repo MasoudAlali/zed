@@ -14874,6 +14874,24 @@ async fn test_format_selections_action_available_when_range_formatting_is_suppor
 }
 
 #[gpui::test]
+async fn test_format_selections_action_available_for_cursor_when_range_formatting_is_supported(
+    cx: &mut TestAppContext,
+) {
+    let (_, editor, cx, _) = setup_range_format_test(cx).await;
+
+    editor.update_in(cx, |editor, window, cx| {
+        editor.set_text("foo\nbar\n", window, cx);
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select_ranges([Point::new(1, 1)..Point::new(1, 1)]);
+        });
+    });
+
+    refresh_editor_actions(cx);
+
+    assert!(cx.update(|window, cx| { window.is_action_available(&FormatSelections, cx) }));
+}
+
+#[gpui::test]
 async fn test_format_selections_action_hidden_without_range_formatting_support(
     cx: &mut TestAppContext,
 ) {
@@ -38026,4 +38044,100 @@ async fn test_toggle_diagnostics_persists_across_settings_change(cx: &mut TestAp
             "diagnostics should be re-enabled after second toggle"
         );
     });
+}
+
+#[gpui::test]
+async fn test_toggle_markdown_block_quote(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let mut cx = EditorTestContext::new(cx).await;
+
+    // No-op with no language
+    cx.set_state(indoc! {"
+        «helloˇ» world
+    "});
+    cx.update_editor(|e, window, cx| e.toggle_markdown_block_quote(&ToggleBlockQuote, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «helloˇ» world
+    "});
+
+    // No-op in non-Markdown language (Rust)
+    cx.update_buffer(|buffer, cx| buffer.set_language(Some(rust_lang()), cx));
+    cx.set_state(indoc! {"
+        «helloˇ» world
+    "});
+    cx.update_editor(|e, window, cx| e.toggle_markdown_block_quote(&ToggleBlockQuote, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «helloˇ» world
+    "});
+
+    cx.update_buffer(|buffer, cx| buffer.set_language(Some(markdown_lang()), cx));
+
+    // Line is quoted with an empty selection
+    cx.set_state(indoc! {"
+        helˇlo world
+    "});
+    cx.update_editor(|e, window, cx| e.toggle_markdown_block_quote(&ToggleBlockQuote, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «> hello worldˇ»
+    "});
+
+    // Line is unquoted with an empty selection
+    cx.update_editor(|e, window, cx| e.toggle_markdown_block_quote(&ToggleBlockQuote, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «hello worldˇ»
+    "});
+
+    // Multi-line selection is quoted, including blank lines
+    cx.set_state(indoc! {"
+        «first
+
+        thirdˇ»
+    "});
+    cx.update_editor(|e, window, cx| e.toggle_markdown_block_quote(&ToggleBlockQuote, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «> first
+        >
+        > thirdˇ»
+    "});
+
+    // Multi-line selection is unquoted, including blank lines
+    cx.update_editor(|e, window, cx| e.toggle_markdown_block_quote(&ToggleBlockQuote, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «first
+
+        thirdˇ»
+    "});
+
+    // A multi-line selection, including a mixture of quoted and unquoted lines
+    // and a mixture of empty and non-empty lines, normalizes each line to a
+    // single quote.
+    cx.set_state(indoc! {"
+        «> first
+        second
+        >
+
+        > third
+        >fourthˇ»
+    "});
+    cx.update_editor(|e, window, cx| e.toggle_markdown_block_quote(&ToggleBlockQuote, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «> first
+        > second
+        >
+        >
+        > third
+        > fourthˇ»
+    "});
+
+    // A multi-line selection is unquoted.
+    cx.update_editor(|e, window, cx| e.toggle_markdown_block_quote(&ToggleBlockQuote, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «first
+        second
+
+
+        third
+        fourthˇ»
+    "});
 }

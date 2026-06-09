@@ -88,7 +88,7 @@ pub struct AgentSettingsContent {
     pub sidebar_button: Option<bool>,
     /// Where to dock the agent panel.
     ///
-    /// Default: left
+    /// Default: left (Agentic layout), right (Classic layout)
     pub dock: Option<DockPosition>,
     /// Whether the agent panel should use flexible (proportional) sizing.
     ///
