@@ -2,7 +2,9 @@ use editor::{EditorSettings, ui_scrollbar_settings_from_raw};
 use gpui::Pixels;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use settings::{RegisterSetting, Settings, StatusStyle};
+use settings::{
+    GitPanelClickBehavior, GitPanelGroupBy, GitPanelSortBy, RegisterSetting, Settings, StatusStyle,
+};
 use ui::{
     px,
     scrollbars::{ScrollbarVisibility, ShowScrollbar},
@@ -24,7 +26,8 @@ pub struct GitPanelSettings {
     pub folder_icons: bool,
     pub scrollbar: ScrollbarSettings,
     pub fallback_branch_name: String,
-    pub sort_by_path: bool,
+    pub sort_by: GitPanelSortBy,
+    pub group_by: GitPanelGroupBy,
     pub collapse_untracked_diff: bool,
     pub tree_view: bool,
     pub diff_stats: bool,
@@ -32,6 +35,7 @@ pub struct GitPanelSettings {
     pub show_count_badge: bool,
     pub starts_open: bool,
     pub commit_title_max_length: usize,
+    pub entry_primary_click_action: GitPanelClickBehavior,
 }
 
 #[derive(Default)]
@@ -72,7 +76,8 @@ impl Settings for GitPanelSettings {
                     .map(ui_scrollbar_settings_from_raw),
             },
             fallback_branch_name: git_panel.fallback_branch_name.unwrap(),
-            sort_by_path: git_panel.sort_by_path.unwrap(),
+            sort_by: git_panel.sort_by.unwrap(),
+            group_by: git_panel.group_by.unwrap(),
             collapse_untracked_diff: git_panel.collapse_untracked_diff.unwrap(),
             tree_view: git_panel.tree_view.unwrap(),
             diff_stats: git_panel.diff_stats.unwrap(),
@@ -80,6 +85,7 @@ impl Settings for GitPanelSettings {
             show_count_badge: git_panel.show_count_badge.unwrap(),
             starts_open: git_panel.starts_open.unwrap(),
             commit_title_max_length: git_panel.commit_title_max_length.unwrap(),
+            entry_primary_click_action: git_panel.entry_primary_click_action.unwrap(),
         }
     }
 }
