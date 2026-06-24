@@ -2740,6 +2740,7 @@ fn run_multi_workspace_sidebar_visual_tests(
                             ui_scroll_position: None,
                             draft_prompt: None,
                             sandboxed_terminal_temp_dir: None,
+                            sandbox_grants: Default::default(),
                         },
                         path_list,
                         cx,
