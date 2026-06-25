@@ -346,13 +346,13 @@ impl KnipPanel {
         let categories = [
             IssueCategory {
                 title: "Unused Dependencies",
-                icon: IconName::Library,
+                icon: IconName::Box,
                 issue_type: IssueType::Dependency,
                 items: dependencies,
             },
             IssueCategory {
                 title: "Unused Dev Dependencies",
-                icon: IconName::Library,
+                icon: IconName::Box,
                 issue_type: IssueType::DevDependency,
                 items: dev_dependencies,
             },
