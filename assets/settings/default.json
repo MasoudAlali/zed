@@ -1491,7 +1491,7 @@
   "line_ending": "detect",
   // Whether or not to perform a buffer format before saving: [on, off]
   // Keep in mind, if the autosave with delay is enabled, format_on_save will be ignored
-  "format_on_save": "on",
+  "format_on_save": "off",
   // How to perform a buffer format. This setting can take multiple values:
   //
   // 1. Default. Format files using Zed's Prettier integration (if applicable),
@@ -1671,13 +1671,15 @@
     ///
     /// Default: 0
     "gutter_debounce": 0,
-    // Control whether the git blame information is shown inline,
-    // in the currently focused line.
+    // Control whether the git blame information is shown for the currently
+    // focused line, and where it is rendered.
     "inline_blame": {
       "enabled": true,
       // Sets a delay after which the inline blame information is shown.
       // Delay is restarted with every cursor movement.
       "delay_ms": 0,
+      // Where to render the blame information when it is enabled.
+      "location": "inline",
       // The amount of padding between the end of the source line and the start
       // of the inline blame in units of em widths.
       "padding": 7,
@@ -2196,6 +2198,7 @@
   // Different settings for specific languages.
   "languages": {
     "Astro": {
+      "format_on_save": "on",
       "language_servers": ["astro-language-server", "..."],
       "prettier": {
         "allowed": true,
@@ -2208,14 +2211,12 @@
       },
     },
     "C": {
-      "format_on_save": "off",
       "use_on_type_format": false,
       "prettier": {
         "allowed": false,
       },
     },
     "C++": {
-      "format_on_save": "off",
       "use_on_type_format": false,
       "prettier": {
         "allowed": false,
@@ -2230,6 +2231,7 @@
       },
     },
     "Dart": {
+      "format_on_save": "on",
       "tab_size": 2,
     },
     "Diff": {
@@ -2238,12 +2240,15 @@
       "ensure_final_newline_on_save": false,
     },
     "EEx": {
+      "format_on_save": "on",
       "language_servers": ["elixir-ls", "!expert", "!dexter", "!next-ls", "!lexical", "..."],
     },
     "Elixir": {
+      "format_on_save": "on",
       "language_servers": ["elixir-ls", "!expert", "!dexter", "!next-ls", "!lexical", "!emmet-language-server", "..."],
     },
     "Elm": {
+      "format_on_save": "on",
       "tab_size": 4,
     },
     "Erlang": {
@@ -2255,6 +2260,7 @@
       "preferred_line_length": 72,
     },
     "Go": {
+      "format_on_save": "on",
       "hard_tabs": true,
       "code_actions_on_format": {
         "source.organizeImports": true,
@@ -2262,11 +2268,13 @@
       "debuggers": ["Delve"],
     },
     "GraphQL": {
+      "format_on_save": "on",
       "prettier": {
         "allowed": true,
       },
     },
     "HEEx": {
+      "format_on_save": "on",
       "language_servers": ["elixir-ls", "!expert", "!dexter", "!next-ls", "!lexical", "..."],
     },
     "HTML": {
@@ -2303,6 +2311,7 @@
       "language_servers": ["!ruby-lsp", "..."],
     },
     "Kotlin": {
+      "format_on_save": "on",
       "language_servers": ["!kotlin-language-server", "kotlin-lsp", "..."],
     },
     "LaTeX": {
@@ -2314,7 +2323,6 @@
       },
     },
     "Markdown": {
-      "format_on_save": "off",
       "use_on_type_format": false,
       "remove_trailing_whitespace_on_save": false,
       "allow_rewrap": "anywhere",
@@ -2369,6 +2377,7 @@
       ],
     },
     "Rust": {
+      "format_on_save": "on",
       "debuggers": ["CodeLLDB"],
     },
     "SCSS": {
@@ -2377,6 +2386,7 @@
       },
     },
     "Starlark": {
+      "format_on_save": "on",
       "language_servers": ["starpls", "!buck2-lsp", "!tilt", "..."],
     },
     "Svelte": {
@@ -2404,7 +2414,6 @@
       },
     },
     "SystemVerilog": {
-      "format_on_save": "off",
       "language_servers": ["!slang", "..."],
       "use_on_type_format": false,
     },
@@ -2429,6 +2438,7 @@
       "language_servers": ["!ruby-lsp", "..."],
     },
     "Zig": {
+      "format_on_save": "on",
       "language_servers": ["zls", "..."],
     },
   },
