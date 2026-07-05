@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anthropic::AnthropicModelMode;
 use anyhow::{Result, anyhow};
 use collections::HashMap;
+use copilot::{GlobalCopilotAuth, Status};
 use copilot_chat::responses as copilot_responses;
 use copilot_chat::{
     ChatLocation, ChatMessage, ChatMessageContent, ChatMessagePart, CopilotChat,
@@ -15,7 +16,7 @@ use copilot_chat::{
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
-use gpui::{AnyView, App, AsyncApp, Entity, Subscription, Task};
+use gpui::{App, AsyncApp, Entity, Subscription, Task};
 use http_client::StatusCode;
 use language::language_settings::all_language_settings;
 use language_model::{
@@ -24,7 +25,7 @@ use language_model::{
     LanguageModelName, LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
     LanguageModelProviderState, LanguageModelRequest, LanguageModelRequestMessage,
     LanguageModelToolChoice, LanguageModelToolResultContent, LanguageModelToolSchemaFormat,
-    LanguageModelToolUse, MessageContent, ProviderConfigurationView, RateLimiter, Role, StopReason,
+    LanguageModelToolUse, MessageContent, ProviderSettingsView, RateLimiter, Role, StopReason,
     TokenUsage,
 };
 use settings::SettingsStore;
@@ -145,7 +146,7 @@ impl LanguageModelProvider for CopilotChatLanguageModelProvider {
             return Task::ready(Ok(()));
         };
 
-        let Some(copilot_chat) = CopilotChat::global(cx) else {
+        let Some(copilot) = GlobalCopilotAuth::try_global(cx).cloned() else {
             return Task::ready(Err(anyhow!(concat!(
                 "Copilot must be enabled for Copilot Chat to work. ",
                 "Please enable Copilot and try again."
@@ -153,46 +154,65 @@ impl LanguageModelProvider for CopilotChatLanguageModelProvider {
             .into()));
         };
 
-        let task = copilot_chat.update(cx, |copilot_chat, cx| copilot_chat.sign_in(cx));
-        cx.spawn(async move |_| task.await.map_err(Into::into))
-    }
-
-    fn configuration_view(
-        &self,
-        _target_agent: language_model::ConfigurationViewTargetAgent,
-        _: &mut Window,
-        cx: &mut App,
-    ) -> AnyView {
-        cx.new(|cx| {
-            copilot_ui::ConfigurationView::new(
-                |cx| {
-                    CopilotChat::global(cx)
-                        .map(|m| m.read(cx).is_authenticated())
-                        .unwrap_or(false)
-                },
-                copilot_ui::ConfigurationMode::Chat,
-                cx,
-            )
-        })
-        .into()
-    }
-
-    fn configuration_view_v2(
-        &self,
-        target_agent: language_model::ConfigurationViewTargetAgent,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> ProviderConfigurationView {
-        // GitHub Copilot's control is just a sign-in button, so render it inline
-        // rather than behind a sub-page.
-        ProviderConfigurationView::Inline(self.configuration_view(target_agent, window, cx))
-    }
-
-    fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {
-        let Some(copilot_chat) = CopilotChat::global(cx) else {
-            return Task::ready(Ok(()));
+        let err = match copilot.0.read(cx).status() {
+            Status::Authorized => return Task::ready(Ok(())),
+            Status::Disabled => anyhow!(
+                "Copilot must be enabled for Copilot Chat to work. Please enable Copilot and try again."
+            ),
+            Status::Error(err) => anyhow!(format!(
+                "Received the following error while signing into Copilot: {err}"
+            )),
+            Status::Starting { task: _ } => anyhow!(
+                "Copilot is still starting, please wait for Copilot to start then try again"
+            ),
+            Status::Unauthorized => anyhow!(
+                "Unable to authorize with Copilot. Please make sure that you have an active Copilot and Copilot Chat subscription."
+            ),
+            Status::SignedOut { .. } => {
+                anyhow!("You have signed out of Copilot. Please sign in to Copilot and try again.")
+            }
+            Status::SigningIn { prompt: _ } => anyhow!("Still signing into Copilot..."),
         };
-        copilot_chat.update(cx, |copilot_chat, cx| copilot_chat.sign_out(cx))
+
+        Task::ready(Err(err.into()))
+    }
+
+    fn settings_view(&self, cx: &mut App) -> Option<ProviderSettingsView> {
+        let is_authenticated = self.state.read(cx).is_authenticated(cx);
+        let title = if is_authenticated {
+            None
+        } else {
+            Some("Configure Copilot".into())
+        };
+        let description = if is_authenticated {
+            None
+        } else {
+            Some(language_model::InlineDescription::Text(
+                "Requires an active GitHub Copilot subscription.".into(),
+            ))
+        };
+
+        Some(ProviderSettingsView::Inline(
+            language_model::InlineProviderSettings {
+                title,
+                description,
+                create_view: Arc::new(|_window, cx| {
+                    cx.new(|cx| {
+                        copilot_ui::ConfigurationView::new(
+                            |cx| {
+                                CopilotChat::global(cx)
+                                    .map(|m| m.read(cx).is_authenticated())
+                                    .unwrap_or(false)
+                            },
+                            copilot_ui::ConfigurationMode::Chat,
+                            cx,
+                        )
+                        .compact()
+                    })
+                    .into()
+                }),
+            },
+        ))
     }
 }
 
