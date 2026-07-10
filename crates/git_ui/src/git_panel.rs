@@ -3,9 +3,11 @@ use crate::commit_modal::CommitModal;
 use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
 use crate::commit_view::CommitView;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
-use crate::project_diff::{BranchDiff, Diff, ProjectDiff};
+use crate::project_diff::{DeployBranchDiff, Diff, ProjectDiff};
 use crate::remote_output::{self, RemoteAction, SuccessMessage};
 use crate::solo_diff_view::SoloDiffView;
+use crate::staged_diff::StagedDiff;
+use crate::unstaged_diff::UnstagedDiff;
 use crate::{branch_picker, picker_prompt, render_remote_button};
 use crate::{
     git_panel_settings::GitPanelSettings, git_status_icon, repository_selector::RepositorySelector,
@@ -25,8 +27,9 @@ use git::Oid;
 use git::commit::ParsedCommitMessage;
 use git::repository::{
     Branch, CommitData, CommitDetails, CommitOptions, CommitSummary, DiffType, FetchOptions,
-    GitCommitTemplate, GitCommitter, LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput,
-    ResetMode, Upstream, UpstreamTracking, UpstreamTrackingStatus, get_git_committer,
+    GitCommitTemplate, GitCommitter, InitialGraphCommitData, LogOrder, LogSource, PushOptions,
+    Remote, RemoteCommandOutput, ResetMode, Upstream, UpstreamTracking, UpstreamTrackingStatus,
+    get_git_committer,
 };
 use git::stash::GitStash;
 use git::status::{DiffStat, StageStatus};
@@ -37,10 +40,10 @@ use git::{
     ViewFile, parse_git_remote_url,
 };
 use gpui::{
-    AbsoluteLength, Action, Anchor, AsyncApp, AsyncWindowContext, Bounds, ClickEvent, DismissEvent,
-    Empty, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, MouseButton, MouseDownEvent,
-    Point, PromptLevel, ScrollStrategy, Subscription, Task, TaskExt, TextStyle,
-    UniformListScrollHandle, WeakEntity, actions, anchored, deferred, point, size, uniform_list,
+    AbsoluteLength, Action, Anchor, AnyElement, AsyncApp, AsyncWindowContext, ClickEvent,
+    DismissEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, MouseButton,
+    MouseDownEvent, Pixels, Point, PromptLevel, ScrollStrategy, Subscription, Task, TaskExt,
+    TextStyle, UniformListScrollHandle, WeakEntity, actions, anchored, deferred, uniform_list,
 };
 use itertools::Itertools;
 use language::{Buffer, BufferEvent, File};
@@ -78,10 +81,9 @@ use strum::{IntoEnumIterator, VariantNames};
 use theme_settings::ThemeSettings;
 use time::OffsetDateTime;
 use ui::{
-    ButtonLike, Checkbox, ContextMenu, ContextMenuEntry, Divider, ElevationIndex,
-    IndentGuideColors, KeyBinding, PopoverMenu, PopoverMenuHandle, ProjectEmptyState,
-    RenderedIndentGuide, ScrollAxes, Scrollbars, SplitButton, Tab, TintColor, Tooltip,
-    WithScrollbar, prelude::*,
+    ButtonLike, Checkbox, Chip, ContextMenu, ContextMenuEntry, Divider, ElevationIndex,
+    IndentGuideColors, KeyBinding, PopoverMenu, PopoverMenuHandle, ProjectEmptyState, ScrollAxes,
+    Scrollbars, SplitButton, Tab, TintColor, Tooltip, WithScrollbar, prelude::*,
 };
 use util::paths::PathStyle;
 use util::{ResultExt, TryFutureExt, markdown::MarkdownInlineCode, maybe, rel_path::RelPath};
@@ -91,12 +93,17 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{DetachAndPromptErr, NotificationId, NotifyTaskExt},
 };
-use zed_actions::{DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize};
+use zed_actions::{
+    DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize, git_panel::ToggleFocus,
+};
 
 const GIT_PANEL_KEY: &str = "GitPanel";
 const UPDATE_DEBOUNCE: Duration = Duration::from_millis(50);
 // TODO: We should revise this part. It seems the indentation width is not aligned with the one in project panel
 const TREE_INDENT: f32 = 16.0;
+const MAX_HISTORY_TAG_CHIPS: usize = 3;
+// Horizontal offset that aligns the tree indent guides with the row icon column.
+const INDENT_GUIDE_LEFT_OFFSET: gpui::Pixels = gpui::px(19.);
 
 actions!(
     git_panel,
@@ -105,8 +112,6 @@ actions!(
         Close,
         /// Toggles the git panel.
         Toggle,
-        /// Toggles focus on the git panel.
-        ToggleFocus,
         /// Opens the git panel menu.
         OpenMenu,
         /// Focuses on the commit message editor.
@@ -137,6 +142,10 @@ actions!(
         ExpandSelectedEntry,
         /// Collapses the selected entry to hide its children.
         CollapseSelectedEntry,
+        /// View unstaged changes
+        ViewUnstagedChanges,
+        /// View staged changes
+        ViewStagedChanges,
         /// Activates the Changes tab.
         ActivateChangesTab,
         /// Activates the History tab.
@@ -395,6 +404,31 @@ struct SerializedCommitMessage {
 enum GitPanelTab {
     Changes,
     History,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum CommitHistory {
+    Loading,
+    /// A non-empty list can still grow on later fetches.
+    /// An empty list means the repository has no commits.
+    Loaded(Rc<[CommitHistoryEntry]>),
+    Error(SharedString),
+}
+
+fn commit_history_from_response(
+    entries: Rc<[CommitHistoryEntry]>,
+    is_loading: bool,
+    error: Option<SharedString>,
+) -> CommitHistory {
+    if !entries.is_empty() {
+        CommitHistory::Loaded(entries)
+    } else if let Some(error) = error {
+        CommitHistory::Error(error)
+    } else if is_loading {
+        CommitHistory::Loading
+    } else {
+        CommitHistory::Loaded(Rc::from([]))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -811,7 +845,7 @@ pub struct GitPanel {
     stash_entries: GitStash,
     active_tab: GitPanelTab,
     commit_history_scroll_handle: UniformListScrollHandle,
-    commit_history_shas: Option<Vec<Oid>>,
+    commit_history: CommitHistory,
     focused_history_entry: Option<usize>,
     history_keyboard_nav: bool,
     _commit_message_buffer_subscription: Option<Subscription>,
@@ -827,6 +861,25 @@ pub struct GitPanel {
 struct BulkStaging {
     repo_id: RepositoryId,
     anchor: RepoPath,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CommitHistoryEntry {
+    sha: Oid,
+    tag_names: Vec<SharedString>,
+}
+
+impl From<&Arc<InitialGraphCommitData>> for CommitHistoryEntry {
+    fn from(commit: &Arc<InitialGraphCommitData>) -> Self {
+        Self {
+            sha: commit.sha,
+            tag_names: commit
+                .tag_names()
+                .into_iter()
+                .map(|tag_name| SharedString::from(tag_name.to_string()))
+                .collect(),
+        }
+    }
 }
 
 const MAX_PANEL_EDITOR_LINES: usize = 6;
@@ -1094,7 +1147,7 @@ impl GitPanel {
                 stash_entries: Default::default(),
                 active_tab: GitPanelTab::Changes,
                 commit_history_scroll_handle: UniformListScrollHandle::new(),
-                commit_history_shas: None,
+                commit_history: CommitHistory::Loading,
                 focused_history_entry: None,
                 history_keyboard_nav: false,
                 _commit_message_buffer_subscription: None,
@@ -3898,6 +3951,40 @@ impl GitPanel {
         }
     }
 
+    fn view_staged_changes(
+        &mut self,
+        _: &ViewStagedChanges,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = self
+            .get_selected_entry()
+            .and_then(|entry| entry.status_entry())
+            .cloned();
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                StagedDiff::deploy_at(workspace, entry, window, cx);
+            });
+        }
+    }
+
+    fn view_unstaged_changes(
+        &mut self,
+        _: &ViewUnstagedChanges,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = self
+            .get_selected_entry()
+            .and_then(|entry| entry.status_entry())
+            .cloned();
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                UnstagedDiff::deploy_at(workspace, entry, window, cx);
+            });
+        }
+    }
+
     fn toggle_tree_view(&mut self, _: &ToggleTreeView, _: &mut Window, cx: &mut Context<Self>) {
         let current_setting = GitPanelSettings::get_global(cx).tree_view;
         if let Some(workspace) = self.workspace.upgrade() {
@@ -4023,13 +4110,20 @@ impl GitPanel {
         let new_active_repository = self.project.read(cx).active_repository(cx);
         let active_repository_changed = self.active_repository.as_ref().map(Entity::entity_id)
             != new_active_repository.as_ref().map(Entity::entity_id);
-        if active_repository_changed && self.amend_pending {
-            // Leaving a repository with a pending amend: undo it so the amend
-            // state doesn't carry over to the newly active repository. The
-            // commit editor still holds the previous repository's buffer here
-            // (`reopen_commit_buffer` swaps it asynchronously below), so this
-            // restores the pre-amend draft into that repository's buffer.
-            self.set_amend_pending(false, cx);
+        if active_repository_changed {
+            if self.amend_pending {
+                // Leaving a repository with a pending amend: undo it so the amend
+                // state doesn't carry over to the newly active repository. The
+                // commit editor still holds the previous repository's buffer here
+                // (`reopen_commit_buffer` swaps it asynchronously below), so this
+                // restores the pre-amend draft into that repository's buffer.
+                self.set_amend_pending(false, cx);
+            }
+            self.git_access = None;
+            self._repo_subscriptions.clear();
+            if self.active_tab == GitPanelTab::History {
+                self.set_commit_history(CommitHistory::Loading, cx);
+            }
         }
         self.active_repository = new_active_repository;
         self.reopen_commit_buffer(window, cx);
@@ -4151,11 +4245,6 @@ impl GitPanel {
             .as_ref()
             .and_then(|op| self.entry_by_path(&op.anchor));
 
-        let active_repository = self.project.read(cx).active_repository(cx);
-        if active_repository != self.active_repository {
-            self.active_repository = active_repository;
-            self.git_access = None;
-        }
         self.entries.clear();
         self.entries_indices.clear();
         self.single_staged_entry.take();
@@ -4654,7 +4743,14 @@ impl GitPanel {
                         .color(Color::Muted),
                 );
                 match (style, is_push) {
+                    (PushPrLink { label, url }, _) => {
+                        this.action(label, move |_window, cx| cx.open_url(&url))
+                    }
                     (Toast | ToastWithLog { .. }, true) => {
+                        // If we were not able to parse a valid URL from the
+                        // output of a push command, we'll simply dispatch the
+                        // generic `CreatePullRequest` action when the toast
+                        // button is pressed.
                         this.action("Create Pull Request", move |window, cx| {
                             window
                                 .dispatch_action(Box::new(zed_actions::git::CreatePullRequest), cx);
@@ -5659,41 +5755,43 @@ impl GitPanel {
     fn render_history_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex().flex_1().size_full().overflow_hidden().map(|this| {
             let has_repo = self.active_repository.is_some();
-            let has_commits = self
-                .commit_history_shas
-                .as_ref()
-                .map_or(false, |shas| !shas.is_empty());
-            let is_loading = self.commit_history_shas.is_none() && has_repo;
-            if is_loading {
-                this.child(
-                    h_flex()
-                        .flex_1()
-                        .justify_center()
-                        .child(Label::new("Loading Commit History…").color(Color::Muted)),
-                )
-            } else if !has_repo || !has_commits {
-                this.child(
-                    h_flex()
-                        .flex_1()
-                        .justify_center()
-                        .child(Label::new("No commits yet").color(Color::Muted)),
-                )
-            } else {
-                match self.render_commit_history(window, cx) {
-                    Some(history) => this.child(history),
-                    None => this.child(
-                        h_flex()
-                            .flex_1()
-                            .justify_center()
-                            .child(Label::new("Failed to load commits").color(Color::Muted)),
-                    ),
+            match &self.commit_history {
+                _ if !has_repo => {
+                    this.child(Self::render_history_placeholder("No repository found"))
                 }
+                CommitHistory::Error(_) => this.child(Self::render_history_placeholder(
+                    "Failed to load commit history",
+                )),
+                CommitHistory::Loading => {
+                    this.child(Self::render_history_placeholder("Loading Commit History…"))
+                }
+                CommitHistory::Loaded(entries) if entries.is_empty() => {
+                    this.child(Self::render_history_placeholder("No commits yet"))
+                }
+                CommitHistory::Loaded(_) => match self.render_commit_history(window, cx) {
+                    Some(history) => this.child(history),
+                    None => this.child(Self::render_history_placeholder("Failed to load commits")),
+                },
             }
         })
     }
 
+    fn render_history_placeholder(message: &'static str) -> impl IntoElement {
+        h_flex()
+            .flex_1()
+            .justify_center()
+            .child(Label::new(message).color(Color::Muted))
+    }
+
+    fn commit_history_entries(&self) -> &[CommitHistoryEntry] {
+        match &self.commit_history {
+            CommitHistory::Loaded(entries) => entries,
+            CommitHistory::Loading | CommitHistory::Error(_) => &[],
+        }
+    }
+
     fn select_next_history_entry(&mut self, cx: &mut Context<Self>) {
-        let count = self.commit_history_shas.as_ref().map_or(0, Vec::len);
+        let count = self.commit_history_entries().len();
         if count == 0 {
             return;
         }
@@ -5709,7 +5807,7 @@ impl GitPanel {
     }
 
     fn select_previous_history_entry(&mut self, cx: &mut Context<Self>) {
-        let count = self.commit_history_shas.as_ref().map_or(0, Vec::len);
+        let count = self.commit_history_entries().len();
         if count == 0 {
             return;
         }
@@ -5728,14 +5826,14 @@ impl GitPanel {
         let Some(index) = self.focused_history_entry else {
             return;
         };
-        let Some(sha) = self.commit_history_shas.as_ref().and_then(|s| s.get(index)) else {
+        let Some(entry) = self.commit_history_entries().get(index) else {
             return;
         };
         let Some(active_repository) = self.active_repository.as_ref() else {
             return;
         };
         CommitView::open(
-            sha.to_string(),
+            entry.sha.to_string(),
             active_repository.downgrade(),
             self.workspace.clone(),
             None,
@@ -5772,12 +5870,10 @@ impl GitPanel {
             GitPanelTab::History => {
                 self.focus_handle.focus(window, cx);
                 self.load_commit_history(cx);
-                self.focused_history_entry = Some(0);
             }
             GitPanelTab::Changes => {
                 self.focus_handle.focus(window, cx);
-                self.commit_history_shas.take();
-                self.focused_history_entry = None;
+                self.set_commit_history(CommitHistory::Loading, cx);
                 self._repo_subscriptions.clear();
             }
         }
@@ -5789,12 +5885,9 @@ impl GitPanel {
             return;
         };
 
-        let Some(branch) = active_repository.read(cx).branch.as_ref() else {
+        let Some(log_source) = Self::commit_history_log_source(active_repository, cx) else {
             return;
         };
-
-        let branch_name = branch.name().to_string();
-        let log_source = LogSource::Branch(branch_name.into());
         let log_order = LogOrder::DateOrder;
 
         // Kick off the git log fetch so data is ready when the user switches to History.
@@ -5805,47 +5898,78 @@ impl GitPanel {
     }
 
     fn load_commit_history(&mut self, cx: &mut Context<Self>) {
-        let Some(active_repository) = self.active_repository.as_ref() else {
+        let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
 
         if self._repo_subscriptions.is_empty() {
             self._repo_subscriptions.push(cx.subscribe(
-                active_repository,
+                &active_repository,
                 |this, _repo, event, cx| {
                     if let RepositoryEvent::GraphEvent(_, _) = event {
                         if this.active_tab == GitPanelTab::History {
-                            this.fetch_commit_history_shas(cx);
+                            this.fetch_commit_history_entries(cx);
                         }
                     }
                 },
             ));
             self._repo_subscriptions
-                .push(cx.observe(active_repository, |_this, _repo, cx| {
+                .push(cx.observe(&active_repository, |_this, _repo, cx| {
                     cx.notify();
                 }));
         }
 
-        self.fetch_commit_history_shas(cx);
+        self.fetch_commit_history_entries(cx);
     }
 
-    fn fetch_commit_history_shas(&mut self, cx: &mut Context<Self>) {
-        let Some(active_repository) = self.active_repository.as_ref() else {
+    fn fetch_commit_history_entries(&mut self, cx: &mut Context<Self>) {
+        let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
 
-        let Some(branch) = active_repository.read(cx).branch.as_ref() else {
+        let Some(log_source) = Self::commit_history_log_source(&active_repository, cx) else {
+            // No HEAD commit at all (unborn/empty repository).
+            self.set_commit_history(CommitHistory::Loaded(Rc::from([])), cx);
             return;
         };
-
-        let branch_name = branch.name().to_string();
-        let log_source = LogSource::Branch(branch_name.into());
         let log_order = LogOrder::DateOrder;
 
-        self.commit_history_shas = Some(active_repository.update(cx, |repository, cx| {
+        let (entries, is_loading, error) = active_repository.update(cx, |repository, cx| {
             let response = repository.graph_data(log_source, log_order, 0..usize::MAX, cx);
-            response.commits.iter().map(|commit| commit.sha).collect()
-        }));
+            let entries: Rc<[CommitHistoryEntry]> = response
+                .commits
+                .iter()
+                .map(CommitHistoryEntry::from)
+                .collect();
+            (entries, response.is_loading, response.error)
+        });
+
+        self.set_commit_history(commit_history_from_response(entries, is_loading, error), cx);
+    }
+
+    fn set_commit_history(&mut self, commit_history: CommitHistory, cx: &mut Context<Self>) {
+        let changed = self.commit_history != commit_history;
+        self.commit_history = commit_history;
+        // Keep the focused entry within range as the history grows or clears.
+        let count = self.commit_history_entries().len();
+        let focused = self.focused_history_entry.unwrap_or(0);
+        self.focused_history_entry = (count > 0).then(|| focused.min(count - 1));
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn commit_history_log_source(
+        active_repository: &Entity<Repository>,
+        cx: &App,
+    ) -> Option<LogSource> {
+        let repository = active_repository.read(cx);
+        let head_commit = repository.head_commit.as_ref()?;
+        if let Some(branch) = repository.branch.as_ref() {
+            Some(LogSource::Branch(branch.name().to_string().into()))
+        } else {
+            Some(LogSource::Sha(head_commit.sha.as_ref().parse().ok()?))
+        }
     }
 
     fn git_remote(&self, cx: &mut App) -> Option<GitRemote> {
@@ -5865,11 +5989,14 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let shas = self.commit_history_shas.clone()?;
+        let CommitHistory::Loaded(entries) = &self.commit_history else {
+            return None;
+        };
+        let entries = entries.clone();
         let active_repository = self.active_repository.as_ref()?;
         let workspace = self.workspace.clone();
         let repo_weak = active_repository.downgrade();
-        let item_count = shas.len();
+        let item_count = entries.len();
         let commit_history_scroll_handle = self.commit_history_scroll_handle.clone();
         let remote = self.git_remote(cx);
 
@@ -5903,10 +6030,11 @@ impl GitPanel {
 
                             let visible_data: Vec<Option<Arc<CommitData>>> = repo_weak
                                 .update(cx, |repository, cx| {
-                                    shas[range.clone()]
+                                    entries[range.clone()]
                                         .iter()
-                                        .map(|sha| {
-                                            match repository.fetch_commit_data(*sha, false, cx) {
+                                        .map(|entry| {
+                                            match repository.fetch_commit_data(entry.sha, false, cx)
+                                            {
                                                 CommitDataState::Loaded(data) => Some(data.clone()),
                                                 CommitDataState::Loading(_) => None,
                                             }
@@ -5915,16 +6043,17 @@ impl GitPanel {
                                 })
                                 .unwrap_or_default();
 
-                            shas[range.clone()]
+                            entries[range.clone()]
                                 .iter()
                                 .zip(visible_data)
                                 .enumerate()
-                                .map(|(ix, (sha, data))| {
+                                .map(|(ix, (entry, data))| {
                                     let index = range.start + ix;
-                                    let sha_string = sha.to_string();
+                                    let sha_string = entry.sha.to_string();
                                     let sha_shared: SharedString = sha_string.clone().into();
                                     let short_sha: SharedString =
                                         sha_string[..7.min(sha_string.len())].to_string().into();
+                                    let tag_names = entry.tag_names.clone();
 
                                     let (subject, author_name, author_email, timestamp): (
                                         SharedString,
@@ -5999,7 +6128,42 @@ impl GitPanel {
                                             h_flex()
                                                 .gap_1()
                                                 .w_full()
+                                                .min_w_0()
                                                 .child(Label::new(subject).truncate())
+                                                .children((!tag_names.is_empty()).then(|| {
+                                                    let hidden_tag_count = tag_names
+                                                        .len()
+                                                        .saturating_sub(MAX_HISTORY_TAG_CHIPS);
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .min_w_0()
+                                                        .children(
+                                                            tag_names
+                                                                .iter()
+                                                                .take(MAX_HISTORY_TAG_CHIPS)
+                                                                .cloned()
+                                                                .map(|tag_name| {
+                                                                    Chip::new(tag_name.clone())
+                                                                        .truncate()
+                                                                        .tooltip(Tooltip::text(
+                                                                            tag_name,
+                                                                        ))
+                                                                }),
+                                                        )
+                                                        .when(hidden_tag_count > 0, |this| {
+                                                            let hidden_tag_names = tag_names
+                                                                [MAX_HISTORY_TAG_CHIPS..]
+                                                                .join(", ");
+                                                            this.child(
+                                                                Chip::new(format!(
+                                                                    "+{hidden_tag_count}"
+                                                                ))
+                                                                .tooltip(Tooltip::text(
+                                                                    hidden_tag_names,
+                                                                )),
+                                                            )
+                                                        })
+                                                }))
                                                 .when(is_unpushed, |this| {
                                                     this.child(
                                                         Icon::new(IconName::ArrowUp)
@@ -6105,7 +6269,7 @@ impl GitPanel {
                         .style(ButtonStyle::Outlined)
                         .on_click(move |_, _, cx| {
                             cx.defer(move |cx| {
-                                cx.dispatch_action(&BranchDiff);
+                                cx.dispatch_action(&DeployBranchDiff);
                             })
                         }),
                 )
@@ -6363,43 +6527,15 @@ impl GitPanel {
                             }),
                         )
                         .when(is_tree_view, |list| {
-                            let indent_size = px(TREE_INDENT);
                             list.with_decoration(
-                                ui::indent_guides(indent_size, IndentGuideColors::panel(cx))
+                                ui::indent_guides(px(TREE_INDENT), IndentGuideColors::panel(cx))
+                                    .with_left_offset(INDENT_GUIDE_LEFT_OFFSET)
                                     .with_compute_indents_fn(
                                         cx.entity(),
                                         |this, range, _window, _cx| {
                                             this.compute_visible_depths(range)
                                         },
-                                    )
-                                    .with_render_fn(cx.entity(), |_, params, _, _| {
-                                        // Magic number to align the tree item is 3 here
-                                        // because we're using 12px as the left-side padding
-                                        // and 3 makes the alignment work with the bounding box of the icon
-                                        let left_offset = px(TREE_INDENT + 3_f32);
-                                        let indent_size = params.indent_size;
-                                        let item_height = params.item_height;
-
-                                        params
-                                            .indent_guides
-                                            .into_iter()
-                                            .map(|layout| {
-                                                let bounds = Bounds::new(
-                                                    point(
-                                                        layout.offset.x * indent_size + left_offset,
-                                                        layout.offset.y * item_height,
-                                                    ),
-                                                    size(px(1.), layout.length * item_height),
-                                                );
-                                                RenderedIndentGuide {
-                                                    bounds,
-                                                    layout,
-                                                    is_active: false,
-                                                    hitbox: None,
-                                                }
-                                            })
-                                            .collect()
-                                    }),
+                                    ),
                             )
                         })
                         .group("entries")
@@ -6549,6 +6685,9 @@ impl GitPanel {
                 .context(self.focus_handle.clone())
                 .action(stage_title, ToggleStaged.boxed_clone())
                 .action(restore_title, git::RestoreFile::default().boxed_clone())
+                .separator()
+                .action("Unstaged Changes", ViewUnstagedChanges.boxed_clone())
+                .action("Staged Changes", ViewStagedChanges.boxed_clone())
                 .separator()
                 .action_disabled_when(
                     !is_created,
@@ -7334,6 +7473,8 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::open_diff))
             .on_action(cx.listener(Self::open_solo_diff))
             .on_action(cx.listener(Self::view_file))
+            .on_action(cx.listener(Self::view_unstaged_changes))
+            .on_action(cx.listener(Self::view_staged_changes))
             .on_action(cx.listener(Self::focus_changes_list))
             .on_action(cx.listener(Self::focus_editor))
             .on_action(cx.listener(Self::expand_commit_editor))
@@ -8458,6 +8599,47 @@ mod tests {
         assert_editor_opened_with_path(&workspace, Path::new("src/a/foo.rs"), &mut cx);
     }
 
+    async fn history_panel_for_project(
+        fs: Arc<FakeFs>,
+        cx: &mut TestAppContext,
+    ) -> Entity<GitPanel> {
+        let project = Project::test(fs, [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.activate_history_tab(&ActivateHistoryTab, window, cx);
+        });
+        cx.run_until_parked();
+        panel
+    }
+
+    async fn wait_for_commit_history_to_settle(panel: &Entity<GitPanel>, cx: &mut TestAppContext) {
+        cx.condition(panel, |panel, _| {
+            !matches!(panel.commit_history, CommitHistory::Loading)
+        })
+        .await;
+    }
+
     #[test]
     fn test_format_git_error_toast_message_prefers_raw_rpc_message() {
         let rpc_error = RpcError::from_proto(
@@ -8496,6 +8678,154 @@ mod tests {
         assert_eq!(
             message,
             "Your local changes to the following files would be overwritten by merge"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_history_tab_stops_loading_for_unborn_branch(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree("/root", json!({ "project": { ".git": {} } }))
+            .await;
+
+        let dot_git = Path::new(path!("/root/project/.git"));
+        fs.set_branch_name(dot_git, Some("main"));
+        fs.with_git_state(dot_git, false, |state| {
+            state.refs.remove("HEAD");
+        })
+        .unwrap();
+
+        let panel = history_panel_for_project(fs.clone(), cx).await;
+
+        wait_for_commit_history_to_settle(&panel, cx).await;
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.commit_history, CommitHistory::Loaded(Rc::from([])));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_history_tab_loads_detached_head(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree("/root", json!({ "project": { ".git": {} } }))
+            .await;
+
+        let dot_git = Path::new(path!("/root/project/.git"));
+        let sha: Oid = "0123456789012345678901234567890123456789".parse().unwrap();
+        fs.with_git_state(dot_git, false, |state| {
+            state.current_branch_name = None;
+            state.refs.insert("HEAD".into(), sha.to_string());
+            state.graph_commits = vec![Arc::new(git::repository::InitialGraphCommitData {
+                sha,
+                parents: SmallVec::new(),
+                ref_names: Vec::new(),
+            })];
+        })
+        .unwrap();
+
+        let panel = history_panel_for_project(fs.clone(), cx).await;
+
+        wait_for_commit_history_to_settle(&panel, cx).await;
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel.commit_history,
+                CommitHistory::Loaded(Rc::from([CommitHistoryEntry {
+                    sha,
+                    tag_names: Vec::new(),
+                }]))
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_history_tab_surfaces_load_error(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree("/root", json!({ "project": { ".git": {} } }))
+            .await;
+
+        let dot_git = Path::new(path!("/root/project/.git"));
+        let sha: Oid = "0123456789012345678901234567890123456789".parse().unwrap();
+        fs.with_git_state(dot_git, false, |state| {
+            state.current_branch_name = None;
+            state.refs.insert("HEAD".into(), sha.to_string());
+            state.graph_commits = vec![Arc::new(git::repository::InitialGraphCommitData {
+                sha,
+                parents: SmallVec::new(),
+                ref_names: Vec::new(),
+            })];
+        })
+        .unwrap();
+        fs.set_graph_error(dot_git, Some("simulated git log failure".into()));
+
+        let panel = history_panel_for_project(fs.clone(), cx).await;
+
+        wait_for_commit_history_to_settle(&panel, cx).await;
+        panel.read_with(cx, |panel, _| {
+            assert!(matches!(panel.commit_history, CommitHistory::Error(_)));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_history_tab_without_repository(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree("/root", json!({ "project": {} })).await;
+
+        let panel = history_panel_for_project(fs.clone(), cx).await;
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.commit_history, CommitHistory::Loading);
+        });
+    }
+
+    #[test]
+    fn test_commit_history_from_response() {
+        let sha: Oid = "0123456789012345678901234567890123456789".parse().unwrap();
+        let error = SharedString::from("git log failed");
+        let entries: Rc<[CommitHistoryEntry]> = Rc::from([CommitHistoryEntry {
+            sha,
+            tag_names: Vec::new(),
+        }]);
+        let no_entries: Rc<[CommitHistoryEntry]> = Rc::from([]);
+
+        // Commits win even while the fetch task still reports `is_loading`.
+        assert_eq!(
+            commit_history_from_response(entries.clone(), true, None),
+            CommitHistory::Loaded(entries.clone())
+        );
+        assert_eq!(
+            commit_history_from_response(entries.clone(), false, None),
+            CommitHistory::Loaded(entries.clone())
+        );
+        // Commits also take precedence over a concurrently reported error.
+        assert_eq!(
+            commit_history_from_response(entries.clone(), true, Some(error.clone())),
+            CommitHistory::Loaded(entries)
+        );
+
+        // With no commits a terminal error beats the loading state.
+        assert_eq!(
+            commit_history_from_response(no_entries.clone(), true, Some(error.clone())),
+            CommitHistory::Error(error.clone())
+        );
+        assert_eq!(
+            commit_history_from_response(no_entries.clone(), false, Some(error.clone())),
+            CommitHistory::Error(error)
+        );
+
+        // When no commits and no error, loading vs. finished-empty hinges on `is_loading`.
+        assert_eq!(
+            commit_history_from_response(no_entries.clone(), true, None),
+            CommitHistory::Loading
+        );
+        assert_eq!(
+            commit_history_from_response(no_entries.clone(), false, None),
+            CommitHistory::Loaded(no_entries)
         );
     }
 
