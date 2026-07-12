@@ -797,6 +797,7 @@ pub enum GitPanelGroupBy {
     None,
     #[default]
     Status,
+    Staging,
 }
 
 #[derive(
