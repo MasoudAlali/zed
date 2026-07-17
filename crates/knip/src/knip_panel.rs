@@ -434,7 +434,7 @@ impl KnipPanel {
         let Some(worktree_id) = worktree_id else {
             return;
         };
-        let Ok(rel_path) = RelPath::new(Path::new(path), PathStyle::Posix) else {
+        let Ok(rel_path) = RelPath::new(Path::new(path), PathStyle::Unix) else {
             return;
         };
         let project_path: ProjectPath = (worktree_id, rel_path.as_ref()).into();
