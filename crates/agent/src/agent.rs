@@ -34,7 +34,8 @@ use acp_thread::{
 };
 use agent_client_protocol::schema::v1 as acp;
 use agent_skills::{
-    MAX_SKILL_DESCRIPTIONS_SIZE, MAX_SKILL_FILE_SIZE, ProjectSkillGroup, SKILL_FILE_NAME, Skill,
+    AGENTS_DIR_NAME, MAX_SKILL_DESCRIPTIONS_SIZE, MAX_SKILL_FILE_SIZE, ProjectSkillGroup,
+    SKILL_FILE_NAME, Skill,
     SkillIndex, SkillLoadError, SkillLoadWarning, SkillScopeId, SkillSource, SkillSummary,
     builtin_skills, global_skills_dirs, load_skills_from_directory, parse_skill_frontmatter,
     project_skills_relative_path, project_skills_relative_paths, read_skill_body_from_content,
@@ -447,14 +448,28 @@ impl gpui::EventEmitter<SkillLoadingIssuesUpdated> for NativeAgent {}
 static RULES_FILE_REL_PATHS: LazyLock<Vec<Arc<RelPath>>> = LazyLock::new(|| {
     RULES_FILE_NAMES
         .iter()
-        .filter_map(|name| RelPath::unix(name).ok().map(|path| path.into_arc()))
+        .filter_map(|name| {
+            RelPath::from_unix_str(name)
+                .ok()
+                .map(|path| path.into_arc())
+        })
         .collect()
+});
+
+static AGENTS_PREFIX: LazyLock<Option<Arc<RelPath>>> = LazyLock::new(|| {
+    RelPath::from_unix_str(AGENTS_DIR_NAME)
+        .ok()
+        .map(|path| path.into_arc())
 });
 
 static SKILLS_PREFIXES: LazyLock<Vec<Arc<RelPath>>> = LazyLock::new(|| {
     project_skills_relative_paths()
         .iter()
-        .filter_map(|rel| RelPath::unix(rel).ok().map(|path| path.into_arc()))
+        .filter_map(|rel| {
+            RelPath::from_unix_str(rel)
+                .ok()
+                .map(|path| path.into_arc())
+        })
         .collect()
 });
 
@@ -513,7 +528,7 @@ async fn expand_project_skills_directories(
 }
 
 fn project_skill_files_from_worktree(worktree: &Worktree) -> Vec<ProjectSkillFile> {
-    let Ok(skill_file_name) = RelPath::unix(SKILL_FILE_NAME) else {
+    let Ok(skill_file_name) = RelPath::from_unix_str(SKILL_FILE_NAME) else {
         return Vec::new();
     };
 
@@ -534,7 +549,7 @@ fn project_skill_files_from_worktree(worktree: &Worktree) -> Vec<ProjectSkillFil
 
             skill_files.push(ProjectSkillFile {
                 display_path: worktree.absolutize(&relative_path),
-                relative_path,
+                relative_path: relative_path.into(),
                 size: skill_file.size,
             });
         }
@@ -1360,6 +1375,9 @@ impl NativeAgent {
                     RULES_FILE_REL_PATHS
                         .iter()
                         .any(|rules_path| path_ref == rules_path.as_ref())
+                        || AGENTS_PREFIX
+                            .as_ref()
+                            .is_some_and(|prefix| path_ref.starts_with(prefix))
                         || SKILLS_PREFIXES
                             .iter()
                             .any(|prefix| path_ref.starts_with(prefix))
