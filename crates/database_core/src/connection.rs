@@ -742,10 +742,10 @@ fn build_postgres_tls_config(
                         .with_root_certificates(root_store)
                         .with_no_client_auth()
                 } else {
-                    rustls::ClientConfig::with_platform_verifier()
+                    rustls::ClientConfig::with_platform_verifier()?
                 }
             } else {
-                rustls::ClientConfig::with_platform_verifier()
+                rustls::ClientConfig::with_platform_verifier()?
             }
         }
         // SslMode::Require encrypts the connection but does NOT verify the server's
@@ -758,7 +758,7 @@ fn build_postgres_tls_config(
                 .with_custom_certificate_verifier(Arc::new(NoVerification))
                 .with_no_client_auth()
         }
-        _ => rustls::ClientConfig::with_platform_verifier(),
+        _ => rustls::ClientConfig::with_platform_verifier()?,
     };
 
     config.alpn_protocols = Vec::new();
