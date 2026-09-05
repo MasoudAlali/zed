@@ -13,7 +13,6 @@ use gpui::{
     MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Subscription, Task,
     UniformListScrollHandle, WeakEntity,
 };
-use panel::PanelHeader;
 use project;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
@@ -3157,5 +3156,3 @@ impl Panel for DatabasePanel {
         5
     }
 }
-
-impl PanelHeader for DatabasePanel {}
