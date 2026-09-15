@@ -2,7 +2,7 @@ use crate::commit_view::CommitView;
 use anyhow::Result;
 use askpass::AskPassDelegate;
 use editor::hover_markdown_style;
-use futures::{Future, FutureExt as _};
+use futures::Future;
 use git::blame::BlameEntry;
 use git::repository::CommitSummary;
 use git::{GitRemote, commit::ParsedCommitMessage};
@@ -199,26 +199,10 @@ impl<'a> CommitAvatar<'a> {
         let asset_source =
             CommitAvatarAsset::new(remote.clone(), self.sha.clone(), self.author_email.clone());
 
-        // Use fetch_asset directly so we can unconditionally register a notification
-        // for the current view. window.use_asset only notifies the first caller (is_first),
-        // which may be a list renderer that called get_asset earlier — leaving tooltips
-        // permanently stuck on the placeholder.
-        let (task, _) = cx.fetch_asset::<CommitAvatarAsset>(&asset_source);
-        match task.clone().now_or_never() {
-            Some(url) => url.map(|url| Avatar::new(url.to_string())),
-            None => {
-                let entity_id = window.current_view();
-                window
-                    .spawn(cx, async move |cx| {
-                        task.await;
-                        cx.on_next_frame(move |_, cx| {
-                            cx.notify(entity_id);
-                        });
-                    })
-                    .detach();
-                None
-            }
-        }
+        window
+            .use_asset::<CommitAvatarAsset>(&asset_source, cx)
+            .flatten()
+            .map(|url| Avatar::new(url.to_string()))
     }
 }
 
