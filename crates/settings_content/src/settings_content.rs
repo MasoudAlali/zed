@@ -190,6 +190,9 @@ pub struct SettingsContent {
     #[serde(flatten)]
     pub remote: RemoteSettingsContent,
 
+    /// Settings related to the command palette.
+    pub command_palette: Option<CommandPaletteSettingsContent>,
+
     /// Settings related to the file finder.
     pub file_finder: Option<FileFinderSettingsContent>,
 
@@ -402,7 +405,7 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, database_panel, file_finder, git_panel, tabs, tab_bar, status_bar, preview_tabs, agent,
+        call_hierarchy, command_palette, database_panel, file_finder, git_panel, tabs, tab_bar, status_bar, preview_tabs, agent,
         agent_servers, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
@@ -1023,6 +1026,15 @@ pub struct PanelSettingsContent {
 
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct CommandPaletteSettingsContent {
+    /// Whether to use command history ranking for sorting in the command palette.
+    ///
+    /// Default: true
+    pub use_command_history: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct FileFinderSettingsContent {
     /// Whether to show file icons in the file finder.
     ///
@@ -1592,8 +1604,6 @@ impl<T: Clone> merge_from::MergeFrom for ExtendingVec<T> {
     }
 }
 
-pub const REST_OF_FILE_SCAN_EXCLUSIONS: &str = "...";
-
 // A SplicingVec in the settings replaces the value it merges over, except that
 // a `...` entry expands to that previous value.
 //
@@ -1606,6 +1616,10 @@ pub const REST_OF_FILE_SCAN_EXCLUSIONS: &str = "...";
 // repeating it.
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SplicingVec(pub Vec<String>);
+
+impl SplicingVec {
+    pub const REST: &str = "...";
+}
 
 impl From<Vec<String>> for SplicingVec {
     fn from(vec: Vec<String>) -> Self {
@@ -1620,7 +1634,7 @@ impl merge_from::MergeFrom for SplicingVec {
             .0
             .iter()
             .flat_map(|entry| {
-                if entry == REST_OF_FILE_SCAN_EXCLUSIONS {
+                if entry == Self::REST {
                     inherited.clone()
                 } else {
                     vec![entry.clone()]
