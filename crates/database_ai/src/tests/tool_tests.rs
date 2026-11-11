@@ -1,5 +1,5 @@
 use agent::AgentTool as _;
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 
 use crate::tools::execute_query::{ExecuteQueryTool, ExecuteQueryToolInput};
 use crate::tools::explain_query::ExplainQueryToolInput;
